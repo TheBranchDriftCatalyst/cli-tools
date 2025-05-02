@@ -51,7 +51,7 @@ tasks:
 
   permissions:
     desc: Set permissions for the binary files
-    sources: ["{{ .DEPLOY_BIN }}/*"]
+    sources: [ "{{ .DEPLOY_BIN }}/*" ]
     cmds:
     - for: sources
       cmd: chmod +x {{ .ITEM }}
