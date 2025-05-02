@@ -6,6 +6,8 @@ vars:
   DEPLOY_BIN:
     # NOTE that this is out of repo scope!!!! for now
     sh: realpath ~/bin
+  OTHER_BIN:
+    sh: realpath ~/dotfiles-2024/bin
 
 tasks:
 
@@ -51,7 +53,7 @@ tasks:
 
   permissions:
     desc: Set permissions for the binary files
-    sources: ["{{ .DEPLOY_BIN }}/*"]
+    sources: [ "{{ .DEPLOY_BIN }}/*", "{{ .OTHER_BIN }}/*" ]
     cmds:
     - for: sources
       cmd: chmod +x {{ .ITEM }}
