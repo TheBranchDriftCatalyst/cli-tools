@@ -1,0 +1,87 @@
+#!/usr/bin/env zsh
+#
+# dexec — pick a running Docker container (with preview) and drop into its shell.
+# Usage: dexec [-c CONTAINER] [-h]
+#
+
+# ─── Constants & Configuration ─────────────────────────────────────────────────
+typeset -r SCRIPT_NAME=$(basename $0)
+typeset -ra REQUIRED_CMDS=(docker fzf)
+typeset -ra SHELL_PREFS=(bash sh ash)
+
+# ─── Logging Helpers ────────────────────────────────────────────────────────────
+log_info()  { print -P "%F{cyan}[INFO]%f  $*"; }
+log_error() { print -P "%F{red}[ERROR]%f $*" >&2; }
+
+# ─── Usage ─────────────────────────────────────────────────────────────────────
+usage() {
+  cat <<EOF
+Usage: $SCRIPT_NAME [options]
+
+Options:
+  -c, --container NAME   non-interactive: use this container
+  -h, --help             show this help and exit
+
+Examples:
+  $SCRIPT_NAME
+  dexec -c my_container
+EOF
+  exit 0
+}
+
+# ─── Dependency Check ───────────────────────────────────────────────────────────
+for cmd in $REQUIRED_CMDS; do
+  if ! command -v $cmd &> /dev/null; then
+    log_error "Required command not found: $cmd"
+    exit 2
+  fi
+done
+
+# ─── Parse Flags ────────────────────────────────────────────────────────────────
+typeset container=""
+while (( $# )); do
+  case $1 in
+    -c|--container)
+      shift
+      container=$1
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      log_error "Unknown option: $1"
+      usage
+      ;;
+  esac
+  shift
+done
+
+# ─── Select Container (with preview) ───────────────────────────────────────────
+if [[ -z $container ]]; then
+  container=$(
+    docker ps --format '{{.Names}}' \
+      | fzf \
+          --height 40% \
+          --reverse \
+          --border \
+          --prompt='Select container: ' \
+          --preview 'docker ps --filter name=^{}$ --format "Name:\t{{.Names}}\nImage:\t{{.Image}}\nStatus:\t{{.Status}}\nPorts:\t{{.Ports}}" ' \
+          --preview-window=right:60%:wrap
+  )
+
+  if [[ -z $container ]]; then
+    log_error "No container selected."
+    exit 1
+  fi
+fi
+
+# ─── Pick the Best Shell ────────────────────────────────────────────────────────
+typeset shell_found=""
+for sh_candidate in $SHELL_PREFS; do
+  if docker exec "$container" sh -c "command -v $sh_candidate" &> /dev/null; then
+    shell_found=$sh_candidate
+    break
+  fi
+done
+
+if [[ -z $s]()]()
