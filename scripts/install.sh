@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# bash <(curl -fsSL https://raw.githubusercontent.com/TheBranchDriftCatalyst/cli-tools/main/scripts/install.sh)
+# bash <(curl -fsSL https://raw.githubusercontent.com/TheBranchDriftCatalyst/cli-tools/main/scripts/install.sh) --dry-run
+
+
 # ---------------
 # 🔧 Config
 # ---------------
@@ -17,6 +21,7 @@ DRY_RUN=true
 bold()   { printf "\033[1m%s\033[0m\n" "$1"; }
 green()  { printf "\033[32m%s\033[0m\n" "$1"; }
 info()   { bold "💡 $1"; }
+yellow() { printf "\033[33m%s\033[0m\n" "$1"; }
 done_msg() { green "✅ $1"; }
 fail()   { printf "\033[31m❌ %s\033[0m\n" "$1"; exit 1; }
 log_dryrun() { $DRY_RUN && yellow "🧪 [dry-run] $1"; }
