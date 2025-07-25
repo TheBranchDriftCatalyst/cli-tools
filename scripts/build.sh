@@ -145,7 +145,8 @@ commit_new_code() {
     info "[dry-run] Would commit new code with message: ${COMMIT_MESSAGE:-<user input>}"
     return
   fi
-
+  # TODO: Add an EDITOR prompt instead of inline text (use $EDITOR with git commit --edit -m)
+  # git commit --edit -m)
   git add .
   if git diff --cached --quiet; then
     skip_msg "No changes to commit."
