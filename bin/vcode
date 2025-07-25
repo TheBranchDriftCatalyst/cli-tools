@@ -1,84 +1,69 @@
-#! /usr/bin/env zsh
-# -----------------------------------------------------------------------------
-# VSCode CLI “code” wrapper with fzf-based project picker & visit counts
-# -----------------------------------------------------------------------------
+#!/bin/bash
 
-# Capture real VSCode CLI before we override it
-if [[ -z "$CODE_CLI_ORIG" ]]; then
-  CODE_CLI_ORIG="$(whence -p code)"
+function _vcode_write_history() {
+  local tmp="${HISTFILE}.$$.$RANDOM.tmp"
+  for d in "${(@k)prio}"; do
+    printf '%s|%s\n' "${prio[$d]}" "$d"
+  done | sort -t'|' -nr | head -n "$MAX_ENTRIES" > "$tmp"
+  mv "$tmp" "$HISTFILE"
+}
+
+
+CODE_CLI="$(whence -p code)"
+[[ -x "$CODE_CLI" ]] || {
+  echo "VSCode CLI not found in PATH." >&2
+  exit 1
+}
+
+HISTFILE="${HOME}/.code_history"
+MAX_ENTRIES=100
+typeset -A prio
+
+mkdir -p "${HISTFILE%/*}"
+touch "$HISTFILE"
+
+# Load history
+while IFS='|' read -r cnt path; do
+  prio["$path"]=$cnt
+done 2>/dev/null < "$HISTFILE"
+
+# --recent flag
+if [[ "$1" == "--recent" ]]; then
+  for d in "${(@k)prio}"; do
+    printf '%s|%s\n' "${prio[$d]}" "$d"
+  done | sort -t'|' -nr | head -n "$MAX_ENTRIES"
+  exit 0
 fi
 
-function code() {
-  # where we persist counts
-  local HISTFILE="${HOME}/.code_history"
-  local DIR; typeset -A prio
-
-  # ensure parent dir & file exist
-  mkdir -p "${HISTFILE%/*}"
-  [[ -f $HISTFILE ]] || : >| "$HISTFILE"
-
-  # load existing history into assoc array: prio["/abs/path"]=count
-  while IFS='|' read -r cnt DIR; do
-    prio["$DIR"]=$cnt
-  done < "$HISTFILE"
-
-
-  # ─── no-arg mode: show fzf prompt ────────────────────────────────────────────
-  if (( $# == 0 )); then
-    if (( ${#prio[@]} == 0 )); then
-      echo "🛈 no project history yet – open one first with 'code <path>'" >&2
-      return 1
-    fi
-
-    # build a sorted list: highest counts first
-    local projects=(
-      ${(f)"$(for d in "${(@k)prio}"; do printf '%s|%s\n' "${prio[$d]}" "$d"; done \
-                     | sort -t'|' -nr \
-                     | cut -d'|' -f2-)"} 
-    )
-
-    # fzf pick
-    local sel
-    sel="$(printf '%s\n' "${projects[@]}" \
-            | fzf --reverse --prompt='VSCode Projects> ' )"
-    [[ -n $sel ]] || return 1
-
-    # bump count, rewrite history file atomically
-    prio["$sel"]=$(( ${prio[$sel]} + 1 ))
-    {
-      for d in "${(@k)prio}"; do
-        printf '%s|%s\n' "${prio[$d]}" "$d"
-      done | sort -t'|' -nr
-    } >| "$HISTFILE"
-
-    # launch VSCode
-    "$CODE_CLI_ORIG" "$sel"
-    return $?
+# No-arg mode: fzf
+if (( $# == 0 )); then
+  if (( ${#prio[@]} == 0 )); then
+    echo "🛈 No project history yet – open one first with 'vcode <path>'" >&2
+    exit 1
   fi
 
+  local sel
+  sel="$(for d in "${(@k)prio}"; do
+           printf '%s|%s\n' "${prio[$d]}" "$d"
+         done | sort -t'|' -nr | cut -d'|' -f2- \
+         | fzf --reverse --prompt='VSCode Projects> ')"
+  [[ -n $sel ]] || exit 1
+  prio["$sel"]=$(( ${prio[$sel]} + 1 ))
+  _vcode_write_history
+  exec "$CODE_CLI" "$sel"
+fi
 
-  # ─── with args: record & delegate ───────────────────────────────────────────
-  local arg project abs
-  for arg in "$@"; do
-    if [[ -d $arg ]]; then
-      project=$arg
-    elif [[ -e $arg ]]; then
-      project=$(dirname "$arg")
-    else
-      continue
-    fi
-    # normalize to absolute
-    abs=$(cd "$project" && pwd -P)
-    prio["$abs"]=$(( ${prio[$abs]:-0} + 1 ))
-  done
+# With arguments
+for arg in "$@"; do
+  if [[ -d $arg ]]; then
+    abs=$(cd "$arg" && pwd -P)
+  elif [[ -e $arg ]]; then
+    abs=$(cd "$(dirname "$arg")" && pwd -P)
+  else
+    continue
+  fi
+  prio["$abs"]=$(( ${prio[$abs]:-0} + 1 ))
+done
 
-  # rewrite history sorted
-  {
-    for d in "${(@k)prio}"; do
-      printf '%s|%s\n' "${prio[$d]}" "$d"
-    done | sort -t'|' -nr
-  } >| "$HISTFILE"
-
-  # finally, call the real code CLI
-  "$CODE_CLI_ORIG" "$@"
-}
+_vcode_write_history
+exec "$CODE_CLI" "$@"
