@@ -49,6 +49,11 @@ while [[ $# -gt 0 ]]; do
     --minor) BUMP_PART="minor"; shift ;;
     --patch) BUMP_PART="patch"; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
+    --commit-message|-m)
+      shift
+      [[ $# -gt 0 ]] || fail "--commit-message requires a value"
+      COMMIT_MESSAGE="$1"
+      shift ;;
     *) fail "Unknown option: $1" ;;
   esac
 done
@@ -136,9 +141,8 @@ tag_and_push() {
 }
 
 commit_new_code() {
-  # TODO: add commit message here as well, or ask to get from the user
   if [[ "$DRY_RUN" == true ]]; then
-    info "[dry-run] Would commit new code"
+    info "[dry-run] Would commit new code with message: ${COMMIT_MESSAGE:-<user input>}"
     return
   fi
 
@@ -146,7 +150,13 @@ commit_new_code() {
   if git diff --cached --quiet; then
     skip_msg "No changes to commit."
   else
-    git commit -m "chore: update code [$TIMESTAMP]"
+    local message="$COMMIT_MESSAGE"
+    if [[ -z "$message" ]]; then
+      echo -en "🔧 Enter commit message: "
+      read -r message
+      [[ -z "$message" ]] && fail "Commit message cannot be empty"
+    fi
+    git commit -m "$message"
     done_msg "Committed new code"
   fi
 }
