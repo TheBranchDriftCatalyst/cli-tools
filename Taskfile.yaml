@@ -4,10 +4,9 @@ vars:
   CMD_SRC:
     sh: realpath ./cmd
   DEPLOY_BIN:
-    # NOTE that this is out of repo scope!!!! for now
     sh: realpath ~/bin
-  OTHER_BIN:
-    sh: realpath ~/dotfiles-2024/bin
+  CLI_BIN:
+    sh: realpath ./bin
 
 tasks:
 
@@ -15,45 +14,53 @@ tasks:
     desc: Run the build and deploy tasks
     cmds:
     - echo {{ .DEPLOY_BIN }}
+    - task --list-all
 
   build:
     desc: Build the CLI commands
+    silent: false
+    cmds:
+    # - task: build:go
+    - task: build:shell
+    - task: permissions
+    - task: deploy-bin
+
+  build:shell:
+    silent: false
+    desc: Build the shell scripts
+    sources:
+    - "./shell/*"
+    # generates:
+    # - "{{ .DEPLOY_BIN }}/*"
+    cmds:
+    - for: sources
+      # cmd: echo {{ .DEPLOY_BIN }}/{{ trimPrefix "cmd/" (dir .ITEM) }}
+      cmd: cp {{ .ITEM }} {{ .DEPLOY_BIN }}/{{ trimPrefix "cmd/" (dir .ITEM) }}
+
+  build:go:
+    desc: Build the CLI commands
+    silent: false
     sources:
     - "{{ .CMD_SRC }}/**/main.go"
-    generates:
-    - "{{ .DEPLOY_BIN }}/*"
+    # generates:
+    # - "{{ .DEPLOY_BIN }}/*"
     cmds:
     - for: sources
       # cmd: echo {{ .DEPLOY_BIN }}/{{ trimPrefix "cmd/" (dir .ITEM) }}
       cmd: go build -o {{ .DEPLOY_BIN }}/{{ trimPrefix "cmd/" (dir .ITEM) }} {{ .ITEM }}
     - task: permissions
 
-  # deploy-shell:
-  #   desc: Deploy the shell scripts
-  #   sources:
-  #   - "{{ .CMD_SRC }}/**/shell/*"
-  #   generates:
-  #   - "{{ .DEPLOY_BIN }}/*"
-  #   cmds:
-  #   - for: sources
-  #     # TODOneed to get the file name again...
-  #     # cmd: cp {{ trimSuffix "" (dir .ITEM) }} {{ .DEPLOY_BIN }}
-
-  # for now we are just building straight to the target bin
-  # deploy:
-  #   deps: [build, permissions]
-  #   desc: symlink all binary files from ./bin/** to ../bin/**
-  #   sources:
-  #   - "{{ .TEMP_BIN }}/*"
-  #   generates:
-  #   - "{{ .DEPLOY_BIN }}/*"
-  #   cmds:
-  #   - for: sources
-  #     cmd: ln -sf $(realpath {{ .ITEM }}) {{ .DEPLOY_BIN }}/{{ base .ITEM}}
+  deploy-bin:
+    desc: Deploy the binary files
+    sources:
+    - "{{ .CLI_BIN }}/*"
+    cmds:
+    - for: sources
+      cmd: ln -sf {{ .ITEM }} {{ .DEPLOY_BIN }}/{{ base .ITEM }}
 
   permissions:
     desc: Set permissions for the binary files
-    sources: [ "{{ .DEPLOY_BIN }}/*", "{{ .OTHER_BIN }}/*" ]
+    sources: [ "{{ .CLI_BIN }}/*" ]
     cmds:
     - for: sources
       cmd: chmod +x {{ .ITEM }}

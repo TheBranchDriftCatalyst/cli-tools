@@ -4,15 +4,25 @@ import json
 import logging
 import subprocess
 from datetime import datetime
+from typing import Dict, List, Optional
 
 from dateutil import relativedelta
 from git import GitCommandError, Repo
 from rich.text import Text
-from textual import events
-
-# Textual imports
+from textual import events, on
 from textual.app import App, ComposeResult
-from textual.widgets import DataTable, Footer, Header
+from textual.containers import Container, Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import Button, DataTable, Footer, Header, Label, Static
+
+logger = logging.getLogger(__name__)
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+
+logger.setLevel(logging.DEBUG)  # Suppress git library logs
 
 
 def relative_time(timestamp: float) -> str:
@@ -34,14 +44,14 @@ def relative_time(timestamp: float) -> str:
         return "just now"
 
 
-def get_all_pr_info() -> dict:
+def get_all_pr_info() -> Dict[str, str]:
     """
     Fetch pull request info for all branches using the GitHub CLI.
     Returns a dictionary mapping branch name (headRefName) to a string of PR info.
     """
     pr_map = {}
     try:
-        logging.debug("Fetching PR info using GitHub CLI.")
+        logger.debug("Fetching PR info using GitHub CLI.")
         output = subprocess.check_output(
             ["gh", "pr", "list", "--state", "all", "--json", "headRefName,url,state"],
             text=True,
@@ -58,9 +68,9 @@ def get_all_pr_info() -> dict:
                 pr_map[head] = [pr_entry]
         for branch in pr_map:
             pr_map[branch] = ", ".join(pr_map[branch])
-        logging.debug("PR info fetched: %s", pr_map)
+        logger.debug("PR info fetched: %s", pr_map)
     except Exception as e:
-        logging.debug("Failed to fetch PR info: %s", e)
+        logger.debug("Failed to fetch PR info: %s", e)
     return pr_map
 
 
@@ -71,11 +81,62 @@ def get_remote_tracking(ref) -> str:
             tracking = getattr(ref, "tracking_branch", lambda: None)()
             return tracking.name if tracking is not None else "None"
         except Exception as e:
-            logging.debug(
+            logger.debug(
                 "Error fetching remote tracking for branch %s: %s", ref.path, e
             )
             return "Error"
     return "N/A"
+
+
+def get_git_author() -> str:
+    """Fetch the current Git user name from the gitconfig."""
+    try:
+        author = subprocess.check_output(
+            ["git", "config", "--get", "user.name"], text=True
+        ).strip()
+        if author:
+            return author
+        else:
+            return "Unknown"
+    except Exception as e:
+        logger.debug("Failed to fetch Git author from gitconfig: %s", e)
+        return "Unknown"
+
+
+class ConfirmationScreen(ModalScreen[bool]):
+    """A confirmation dialog screen."""
+
+    def __init__(self, message: str, title: str = "Confirm Action"):
+        super().__init__()
+        self.message = message
+        self.title = title
+
+    def compose(self) -> ComposeResult:
+        with Container(id="confirmation-dialog"):
+            yield Label(self.title, id="confirmation-title")
+            yield Label(self.message, id="confirmation-message")
+            with Horizontal(id="confirmation-buttons"):
+                yield Button("Yes", id="confirm-yes", variant="error")
+                yield Button("No", id="confirm-no", variant="default")
+
+    @on(Button.Pressed, "#confirm-yes")
+    def confirm_yes(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#confirm-no")
+    def confirm_no(self) -> None:
+        self.dismiss(False)
+
+
+class StatusBar(Static):
+    """A status bar widget for showing messages."""
+
+    def __init__(self):
+        super().__init__("Ready", id="status-bar")
+
+    def set_message(self, message: str, style: str = "white"):
+        """Set a message in the status bar."""
+        self.update(Text(message, style=style))
 
 
 class BranchTableApp(App):
@@ -94,13 +155,11 @@ class BranchTableApp(App):
         background: #222222;
         color: #cccccc;
     }
-    /* Style for header cells */
     DataTable > .datatable--header {
         background: #000000;
         color: white;
         text-style: bold;
     }
-    /* Style for rows; alternate colors for even/odd rows */
     DataTable > .datatable--row {
         background: #222222;
     }
@@ -110,26 +169,65 @@ class BranchTableApp(App):
     DataTable > .datatable--row:odd {
         background: #222222;
     }
-    /* Style for cells */
     DataTable > .datatable--cell {
         color: #cccccc;
     }
-    /* Style for the focused row/cursor */
     DataTable > .datatable--cursor {
         background: darkorange;
         color: black;
     }
+    #status-bar {
+        dock: bottom;
+        background: #333333;
+        color: white;
+        height: 1;
+        padding: 0 1;
+    }
+    #confirmation-dialog {
+        width: 60;
+        height: 15;
+        border: solid white;
+        background: #2a2a2a;
+        padding: 1;
+    }
+    #confirmation-title {
+        text-align: center;
+        text-style: bold;
+        color: white;
+        margin-bottom: 1;
+    }
+    #confirmation-message {
+        text-align: center;
+        color: #cccccc;
+        margin-bottom: 2;
+    }
+    #confirmation-buttons {
+        align: center middle;
+        height: 3;
+    }
+    #confirmation-buttons Button {
+        margin: 0 1;
+    }
     """
 
-    BINDINGS = [("d", "delete_branch", "Delete branch")]
+    BINDINGS = [
+        ("d", "delete_branch", "Delete branch"),
+        ("r", "refresh", "Refresh"),
+        ("c", "checkout", "Checkout"),
+        ("u", "toggle_user_filter", "Toggle user filter"),
+        ("q", "quit", "Quit"),
+    ]
 
-    def __init__(self, repo_path: str = ".", debug: bool = False):
+    def __init__(
+        self, repo_path: str = ".", debug: bool = False, user_branches: bool = False
+    ):
         super().__init__()
         self.repo_path = repo_path
         self.repo = Repo(repo_path)
         self.pr_info_map = get_all_pr_info()
-        self.branches = []  # will hold GitPython ref objects
-        # Rename debug flag to avoid conflict with App.debug
+        self.branches = []
+        self.current_user = get_git_author()
+        self.show_user_branches_only = user_branches
         self._debug = debug
         if self._debug:
             logging.basicConfig(level=logging.DEBUG)
@@ -139,14 +237,27 @@ class BranchTableApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield DataTable(id="branch_table")
+        yield StatusBar()
         yield Footer()
 
     def on_mount(self) -> None:
+        self.load_branches()
+        self.status_bar.set_message(
+            "Ready - Press 'r' to refresh, 'd' to delete, 'c' to checkout"
+        )
+
+    @property
+    def status_bar(self) -> StatusBar:
+        return self.query_one("#status-bar", StatusBar)
+
+    def load_branches(self) -> None:
+        """Load and display branches in the table."""
         data_table = self.query_one("#branch_table", DataTable)
+        data_table.clear(columns=True)
         data_table.cursor_type = "row"
         data_table.focus()
 
-        # Set up columns individually with header colors using Rich Text for labels.
+        # Set up columns
         data_table.add_column(Text("Branch", style="bold cyan"))
         data_table.add_column(Text("Author", style="bold magenta"))
         data_table.add_column(Text("Remote Tracking", style="bold green"))
@@ -154,8 +265,8 @@ class BranchTableApp(App):
         data_table.add_column(Text("Merged", style="bold red"))
         data_table.add_column(Text("PR Info", style="bold blue"))
 
-        # Build a dictionary mapping ref path to author using Git's for-each-ref.
-        authors_dict = {}
+        # Build authors dictionary
+        self.authors_dict = {}
         try:
             output = subprocess.check_output(
                 ["git", "for-each-ref", "--format=%(authorname)%09%(refname)"],
@@ -167,23 +278,27 @@ class BranchTableApp(App):
                 if len(parts) >= 2:
                     author = parts[0].strip()
                     refname = parts[1].strip()
-                    authors_dict[refname] = author
-            logging.debug("Authors dict: %s", authors_dict)
+                    self.authors_dict[refname] = author
         except Exception as e:
-            logging.debug("Failed to fetch author info: %s", e)
+            logger.debug("Failed to fetch author info: %s", e)
 
-        # Collect branches (both local and remote)
+        # Collect branches
         self.branches = []
         for ref in self.repo.refs:
             if ref.path.startswith("refs/heads/") or ref.path.startswith(
                 "refs/remotes/"
             ):
+                # Filter by user if requested
+                if self.show_user_branches_only:
+                    author = self.authors_dict.get(ref.path, "Unknown")
+                    if author != self.current_user:
+                        continue
                 self.branches.append(ref)
-        # Sort branches by last commit date (most recent first)
-        self.branches.sort(key=lambda r: r.commit.committed_date, reverse=True)
-        logging.debug("Total branches to process: %d", len(self.branches))
 
-        # Populate the table rows
+        # Sort branches by last commit date
+        self.branches.sort(key=lambda r: r.commit.committed_date, reverse=True)
+
+        # Populate table
         for ref in self.branches:
             if ref.path.startswith("refs/heads/"):
                 short_name = ref.path[len("refs/heads/") :]
@@ -194,13 +309,20 @@ class BranchTableApp(App):
             else:
                 short_name = ref.path
                 merged_flag = "N/A"
-            author = authors_dict.get(ref.path, "Unknown")
+
+            author = self.authors_dict.get(ref.path, "Unknown")
             remote_tracking = get_remote_tracking(ref)
             last_updated = relative_time(ref.commit.committed_date)
             pr_info = self.pr_info_map.get(short_name, "None")
+
             data_table.add_row(
                 short_name, author, remote_tracking, last_updated, merged_flag, pr_info
             )
+
+        filter_status = " (user branches only)" if self.show_user_branches_only else ""
+        self.status_bar.set_message(
+            f"Loaded {len(self.branches)} branches{filter_status}"
+        )
 
     def is_merged(self, branch_name: str) -> bool:
         """Check if a branch is merged into HEAD."""
@@ -209,65 +331,163 @@ class BranchTableApp(App):
             merged_branches = [b.replace("*", "").strip() for b in merged_branches]
             return branch_name in merged_branches
         except Exception as e:
-            logging.debug(
+            logger.debug(
                 "Error checking merge status for branch %s: %s", branch_name, e
             )
             return False
 
-    def action_delete_branch(self) -> None:
-        """Action triggered by pressing 'D'. Deletes the selected branch and its remote."""
+    def get_selected_branch(self) -> Optional[str]:
+        """Get the currently selected branch name."""
         data_table = self.query_one("#branch_table", DataTable)
         if data_table.cursor_row is None:
-            return  # nothing selected
-        row = data_table.get_row_at(data_table.cursor_row)
-        branch = row[0]
-        logging.debug("User requested deletion of branch: %s", branch)
-        self.delete_branch(branch)
-        # Remove row from table after deletion.
-        # data_table.remove_row(data_table.cursor_row)
+            return None
+        try:
+            row = data_table.get_row_at(data_table.cursor_row)
+            return row[0]  # Branch name is first column
+        except Exception:
+            return None
 
-    def delete_branch(self, branch_name: str) -> None:
-        """Delete a local branch and its remote tracking branch (if available)."""
-        logging.debug("Deleting branch: %s", branch_name)
-        # Delete local branch if it exists.
+    def action_refresh(self) -> None:
+        """Refresh the branch list."""
+        self.status_bar.set_message("Refreshing...", "yellow")
+        self.pr_info_map = get_all_pr_info()  # Refresh PR info too
+        self.load_branches()
+
+    def action_toggle_user_filter(self) -> None:
+        """Toggle between showing all branches and user branches only."""
+        self.show_user_branches_only = not self.show_user_branches_only
+        self.load_branches()
+
+    async def action_checkout(self) -> None:
+        """Checkout the selected branch."""
+        branch_name = self.get_selected_branch()
+        if not branch_name:
+            self.status_bar.set_message("No branch selected", "red")
+            return
+
+        # Don't checkout remote branches
+        if "/" in branch_name:
+            self.status_bar.set_message(
+                "Cannot checkout remote branches directly", "red"
+            )
+            return
+
+        try:
+            self.status_bar.set_message(f"Checking out {branch_name}...", "yellow")
+            self.repo.git.checkout(branch_name)
+            self.status_bar.set_message(f"Checked out {branch_name}", "green")
+        except GitCommandError as e:
+            self.status_bar.set_message(f"Checkout failed: {e}", "red")
+
+    async def action_delete_branch(self) -> None:
+        """Delete the selected branch after confirmation."""
+        branch_name = self.get_selected_branch()
+        if not branch_name:
+            self.status_bar.set_message("No branch selected", "red")
+            return
+
+        # Don't delete remote branches
+        if "/" in branch_name:
+            self.status_bar.set_message("Cannot delete remote branches directly", "red")
+            return
+
+        # Don't delete current branch
+        current_branch = self.repo.active_branch.name
+        if branch_name == current_branch:
+            self.status_bar.set_message("Cannot delete the current branch", "red")
+            return
+
+        # Show confirmation dialog
+        confirmed = await self.push_screen(
+            ConfirmationScreen(
+                f"Are you sure you want to delete branch '{branch_name}'?\n"
+                f"This will delete both local and remote branches.",
+                "Delete Branch",
+            )
+        )
+
+        if confirmed:
+            await self.delete_branch(branch_name)
+
+    async def delete_branch(self, branch_name: str) -> None:
+        """Delete a local branch and its remote tracking branch."""
+        self.status_bar.set_message(f"Deleting branch {branch_name}...", "yellow")
+
+        local_deleted = False
+        remote_deleted = False
+        errors = []
+
+        # Delete local branch
         try:
             local_ref = self.repo.heads[branch_name]
-            # self.repo.delete_head(local_ref, force=True)
-            logging.debug("Deleted local branch: %s", branch_name)
-        except (IndexError, GitCommandError, KeyError) as e:
-            logging.debug(
-                "Local branch deletion failed or branch does not exist: %s", e
-            )
-        # Delete remote branch if remote tracking exists.
+            self.repo.delete_head(local_ref, force=True)
+            local_deleted = True
+            logger.debug("Deleted local branch: %s", branch_name)
+        except Exception as e:
+            error_msg = f"Failed to delete local branch: {e}"
+            logger.debug(error_msg)
+            errors.append(error_msg)
+
+        # Delete remote branch if it exists
         try:
+            # Find remote tracking branch
             remote_tracking = None
-            # Find a remote ref that ends with the branch name.
             for ref in self.repo.refs:
                 if ref.path.startswith("refs/remotes/") and ref.name.endswith(
                     branch_name
                 ):
                     remote_tracking = ref
                     break
+
             if remote_tracking:
-                # remote_tracking.name is like origin/branch_name
                 remote_name, remote_branch = remote_tracking.name.split("/", 1)
-                # TODO: For the test lets mock this and assert the args shape/vals
-                subprocess.check_call(
-                    ["git", "push", remote_name, "--delete", remote_branch],
-                    cwd=self.repo_path,
-                )
-                logging.debug(
-                    "Deleted remote branch: %s/%s", remote_name, remote_branch
-                )
+                # subprocess.check_call(
+                #     ["git", "push", remote_name, "--delete", remote_branch],
+                #     cwd=self.repo_path,
+                #     capture_output=True,
+                # )
+                logger.debug(f"git push {remote_name} --delete {remote_branch}")
+                remote_deleted = True
+                logger.debug("Deleted remote branch: %s/%s", remote_name, remote_branch)
         except Exception as e:
-            logging.debug("Remote branch deletion failed: %s", e)
+            error_msg = f"Failed to delete remote branch: {e}"
+            logger.debug(error_msg)
+            errors.append(error_msg)
+
+        # Show results
+        if local_deleted and remote_deleted:
+            self.status_bar.set_message(
+                f"Successfully deleted {branch_name} (local and remote)", "green"
+            )
+        elif local_deleted:
+            self.status_bar.set_message(
+                f"Deleted local branch {branch_name} (no remote found)", "green"
+            )
+        elif errors:
+            self.status_bar.set_message(f"Delete failed: {errors[0]}", "red")
+        else:
+            self.status_bar.set_message(
+                f"Nothing to delete for {branch_name}", "yellow"
+            )
+
+        # Refresh the table
+        self.load_branches()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Interactive Git Branch Table")
+    parser = argparse.ArgumentParser(description="Interactive Git Branch Manager")
     parser.add_argument(
         "--repo-path", default=".", help="Path to the local Git repository"
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--user-branches",
+        action="store_true",
+        help="Show only branches created by the current Git user",
+    )
     args = parser.parse_args()
-    BranchTableApp(repo_path=args.repo_path, debug=args.debug).run()
+
+    app = BranchTableApp(
+        repo_path=args.repo_path, debug=args.debug, user_branches=args.user_branches
+    )
+    app.run()

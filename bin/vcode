@@ -1,0 +1,84 @@
+#! /usr/bin/env zsh
+# -----------------------------------------------------------------------------
+# VSCode CLI “code” wrapper with fzf-based project picker & visit counts
+# -----------------------------------------------------------------------------
+
+# Capture real VSCode CLI before we override it
+if [[ -z "$CODE_CLI_ORIG" ]]; then
+  CODE_CLI_ORIG="$(whence -p code)"
+fi
+
+function code() {
+  # where we persist counts
+  local HISTFILE="${HOME}/.code_history"
+  local DIR; typeset -A prio
+
+  # ensure parent dir & file exist
+  mkdir -p "${HISTFILE%/*}"
+  [[ -f $HISTFILE ]] || : >| "$HISTFILE"
+
+  # load existing history into assoc array: prio["/abs/path"]=count
+  while IFS='|' read -r cnt DIR; do
+    prio["$DIR"]=$cnt
+  done < "$HISTFILE"
+
+
+  # ─── no-arg mode: show fzf prompt ────────────────────────────────────────────
+  if (( $# == 0 )); then
+    if (( ${#prio[@]} == 0 )); then
+      echo "🛈 no project history yet – open one first with 'code <path>'" >&2
+      return 1
+    fi
+
+    # build a sorted list: highest counts first
+    local projects=(
+      ${(f)"$(for d in "${(@k)prio}"; do printf '%s|%s\n' "${prio[$d]}" "$d"; done \
+                     | sort -t'|' -nr \
+                     | cut -d'|' -f2-)"} 
+    )
+
+    # fzf pick
+    local sel
+    sel="$(printf '%s\n' "${projects[@]}" \
+            | fzf --reverse --prompt='VSCode Projects> ' )"
+    [[ -n $sel ]] || return 1
+
+    # bump count, rewrite history file atomically
+    prio["$sel"]=$(( ${prio[$sel]} + 1 ))
+    {
+      for d in "${(@k)prio}"; do
+        printf '%s|%s\n' "${prio[$d]}" "$d"
+      done | sort -t'|' -nr
+    } >| "$HISTFILE"
+
+    # launch VSCode
+    "$CODE_CLI_ORIG" "$sel"
+    return $?
+  fi
+
+
+  # ─── with args: record & delegate ───────────────────────────────────────────
+  local arg project abs
+  for arg in "$@"; do
+    if [[ -d $arg ]]; then
+      project=$arg
+    elif [[ -e $arg ]]; then
+      project=$(dirname "$arg")
+    else
+      continue
+    fi
+    # normalize to absolute
+    abs=$(cd "$project" && pwd -P)
+    prio["$abs"]=$(( ${prio[$abs]:-0} + 1 ))
+  done
+
+  # rewrite history sorted
+  {
+    for d in "${(@k)prio}"; do
+      printf '%s|%s\n' "${prio[$d]}" "$d"
+    done | sort -t'|' -nr
+  } >| "$HISTFILE"
+
+  # finally, call the real code CLI
+  "$CODE_CLI_ORIG" "$@"
+}

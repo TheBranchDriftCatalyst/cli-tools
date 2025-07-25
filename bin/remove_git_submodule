@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#
+# Remove Git submodule(s) cleanly.
+# Usage: git-rm-submodule [--no-commit] <submodule-path>...
+#
+
+set -euo pipefail
+NO_COMMIT=0
+
+if [[ "${1-}" == "--no-commit" ]]; then
+  NO_COMMIT=1
+  shift
+fi
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 [--no-commit] <submodule-path>..."
+  exit 1
+fi
+
+for subpath in "$@"; do
+  echo "→ Removing submodule: $subpath"
+
+  git submodule deinit -f -- "$subpath"
+  git config -f .gitmodules --remove-section "submodule.$subpath" || true
+  git config -f .git/config --remove-section "submodule.$subpath" 2>/dev/null || true
+
+  git rm --cached -f -- "$subpath"
+
+  rm -rf ".git/modules/$subpath"
+  rm -rf "$subpath"
+
+  git add .gitmodules 2>/dev/null || true
+
+  if (( NO_COMMIT )); then
+    echo "Skipped commit (--no-commit)."
+  else
+    git commit -m "Remove submodule $subpath"
+  fi
+done
+
+echo "✅ Done."

@@ -1,0 +1,10 @@
+{
+    "go.goroot": "/Users/hdaniels/.local/share/mise/installs/go/1.24.2",
+    "debug.javascript.defaultRuntimeExecutable": {
+        "pwa-node": "/Users/hdaniels/.local/share/mise/shims/node"
+    },
+    "go.alternateTools": {
+        "go": "/Users/hdaniels/.local/share/mise/shims/go"
+    },
+    "python.defaultInterpreterPath": "/Users/hdaniels/.local/share/mise/installs/python/3.12.6/bin/python"
+}
