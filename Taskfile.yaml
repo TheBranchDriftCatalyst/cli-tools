@@ -1,6 +1,7 @@
 version: 3
 
 vars:
+  CLI_VERSION: "0.1.0"
   CMD_SRC:
     sh: realpath ./cmd
   DEPLOY_BIN:
@@ -60,7 +61,13 @@ tasks:
 
   permissions:
     desc: Set permissions for the binary files
-    sources: [ "{{ .CLI_BIN }}/*" ]
+    sources: [ "{{ .CLI_BIN }}/*", "./scripts/*" ]
     cmds:
     - for: sources
       cmd: chmod +x {{ .ITEM }}
+
+  build:package:
+    desc: Build the package
+    cmds:
+    - echo "Building package..."
+    - task: "./scripts/*"
