@@ -169,7 +169,7 @@ info "Starting build process (bump: $BUMP_PART, dry-run: $DRY_RUN)"
 commit_new_code
 bump_version
 [[ -n "$NEW_VERSION" ]] || fail "NEW_VERSION not set. Version bump failed."
-commit_version_bump
 create_tarball
+commit_version_bump
 tag_and_push
 done_msg "Build complete."
