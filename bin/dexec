@@ -1,87 +1,257 @@
 #!/usr/bin/env zsh
-#
 # dexec — pick a running Docker container (with preview) and drop into its shell.
-# Usage: dexec [-c CONTAINER] [-h]
-#
+# Usage: dexec [options] [-- CMD ...]
+# Dependencies: docker, fzf
+# Shell: Zsh (POSIX-ish but uses zshisms intentionally)
 
-# ─── Constants & Configuration ─────────────────────────────────────────────────
-typeset -r SCRIPT_NAME=$(basename $0)
+emulate -L zsh
+set -o pipefail
+autoload -Uz colors && colors
+
+# ─── Constants ─────────────────────────────────────────────────────────────────
+typeset -r SCRIPT_NAME="${0##*/}"
 typeset -ra REQUIRED_CMDS=(docker fzf)
-typeset -ra SHELL_PREFS=(bash sh ash)
+# Try shells in this order inside the container
+typeset -ra SHELL_PREFS=(zsh bash ash sh)
 
-# ─── Logging Helpers ────────────────────────────────────────────────────────────
-log_info()  { print -P "%F{cyan}[INFO]%f  $*"; }
-log_error() { print -P "%F{red}[ERROR]%f $*" >&2; }
+# UI glyphs (ASCII-safe fallbacks if TERM is dumb)
+if [[ -t 1 && $TERM != dumb ]]; then
+  NEON_INFO="%F{cyan}󰣇%f"
+  NEON_ERR="%F{red}%f"
+  NEON_OK="%F{green}%f"
+  BOX_TL="┏"; BOX_TR="┓"; BOX_BL="┗"; BOX_BR="┛"; BOX_H="━"; BOX_V="┃"
+else
+  NEON_INFO="[INFO]"
+  NEON_ERR="[ERROR]"
+  NEON_OK="[OK]"
+  BOX_TL="+"; BOX_TR="+"; BOX_BL="+"; BOX_BR="+"; BOX_H="-"; BOX_V="|"
+fi
+
+# ─── Logging ───────────────────────────────────────────────────────────────────
+log_info()  { print -P "${NEON_INFO} %F{cyan}$*%f"; }
+log_error() { print -P "${NEON_ERR} %F{red}$*%f" >&2; }
+log_ok()    { print -P "${NEON_OK} %F{green}$*%f"; }
+
+banner() {
+  local title="$1"
+  local line="$(printf '%0.s'"$BOX_H" {1..60})"
+  print -P "%F{magenta}${BOX_TL}${line}${BOX_TR}%f"
+  print -P "%F{magenta}${BOX_V}%f %F{magenta}${title}%f"
+  print -P "%F{magenta}${BOX_BL}${line}${BOX_BR}%f"
+}
 
 # ─── Usage ─────────────────────────────────────────────────────────────────────
 usage() {
-  cat <<EOF
-Usage: $SCRIPT_NAME [options]
+  cat <<'EOF'
+dexec — fuzzy-pick a running Docker container with a live preview, then exec into the best available shell.
 
+Usage:
+  dexec [options] [-- CMD ...]
 Options:
-  -c, --container NAME   non-interactive: use this container
-  -h, --help             show this help and exit
+  -c, --container NAME    Non-interactive: target this container by name/ID
+  -s, --shell SHELL       Force shell inside container (zsh|bash|ash|sh)
+  -u, --user USER         Exec as this user (name or UID). Use --root for UID 0
+      --root              Shortcut for -u 0
+  -w, --workdir DIR       Set working directory inside container
+  -n, --no-tty            Do not allocate a TTY (default: allocate)
+  -q, --quiet             Quieter logging
+  -h, --help              Show help and exit
+      --emit-completion   Print zsh completion (compdef) to stdout
 
 Examples:
-  $SCRIPT_NAME
-  dexec -c my_container
+  dexec
+  dexec -c api-1
+  dexec -c api-1 --root
+  dexec -c api-1 -- ls -al /etc
+  dexec -s bash
 EOF
   exit 0
 }
 
-# ─── Dependency Check ───────────────────────────────────────────────────────────
+# ─── Completions (generator) ───────────────────────────────────────────────────
+emit_completion() {
+  cat <<'ZSHCOMP'
+#compdef dexec
+# zsh completion for dexec
+local -a _dexec_opts _dexec_shells _dexec_containers
+_dexec_opts=(
+  '(-c --container)'{-c,--container}'[container name or ID]:container:->containers'
+  '(-s --shell)'{-s,--shell}'[force shell]:shell:(zsh bash ash sh)'
+  '(-u --user)'{-u,--user}'[user or UID]:user:'
+  '--root[exec as root (UID 0)]'
+  '(-w --workdir)'{-w,--workdir}'[workdir]:dir:_path_files -/'
+  '(-n --no-tty)'{-n,--no-tty}'[disable TTY]'
+  '(-q --quiet)'{-q,--quiet}'[quieter logs]'
+  '(-h --help)'{-h,--help}'[show help]'
+  '--emit-completion[print completion function]'
+)
+
+case $state in
+  (containers)
+    _dexec_containers=(${(f)"$(docker ps --format '{{.Names}}' 2>/dev/null)"})
+    _describe -t containers 'running containers' _dexec_containers
+    return
+  ;;
+esac
+
+_arguments -s -S $_dexec_opts '*::command:->cmds'
+
+case $state in
+  (cmds)
+    # After `--`, pass through to generic completion
+    _normal
+  ;;
+esac
+ZSHCOMP
+}
+
+# ─── Dependency check ──────────────────────────────────────────────────────────
 for cmd in $REQUIRED_CMDS; do
-  if ! command -v $cmd &> /dev/null; then
+  if ! command -v "$cmd" >/dev/null 2>&1; then
     log_error "Required command not found: $cmd"
     exit 2
   fi
 done
 
-# ─── Parse Flags ────────────────────────────────────────────────────────────────
+# ─── Defaults / Flags ──────────────────────────────────────────────────────────
 typeset container=""
+typeset forced_shell=""
+typeset target_user=""
+typeset workdir=""
+typeset alloc_tty=1
+typeset quiet=0
+
+# ─── Parse args ────────────────────────────────────────────────────────────────
+typeset -a passthru
 while (( $# )); do
-  case $1 in
-    -c|--container)
-      shift
-      container=$1
-      ;;
-    -h|--help)
-      usage
-      ;;
-    *)
-      log_error "Unknown option: $1"
-      usage
-      ;;
+  case "$1" in
+    -c|--container) shift; container="$1" ;;
+    -s|--shell)     shift; forced_shell="$1" ;;
+    -u|--user)      shift; target_user="$1" ;;
+    --root)         target_user="0" ;;
+    -w|--workdir)   shift; workdir="$1" ;;
+    -n|--no-tty)    alloc_tty=0 ;;
+    -q|--quiet)     quiet=1 ;;
+    -h|--help)      usage ;;
+    --emit-completion) emit_completion; exit 0 ;;
+    --) shift; passthru=("$@"); break ;;
+    *) log_error "Unknown option: $1"; usage ;;
   esac
   shift
 done
 
-# ─── Select Container (with preview) ───────────────────────────────────────────
-if [[ -z $container ]]; then
-  container=$(
-    docker ps --format '{{.Names}}' \
-      | fzf \
-          --height 40% \
-          --reverse \
-          --border \
-          --prompt='Select container: ' \
-          --preview 'docker ps --filter name=^{}$ --format "Name:\t{{.Names}}\nImage:\t{{.Image}}\nStatus:\t{{.Status}}\nPorts:\t{{.Ports}}" ' \
-          --preview-window=right:60%:wrap
-  )
+# ─── Select container (fzf) ───────────────────────────────────────────────────
+select_container() {
+  docker ps --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' \
+  | fzf --height 50% --reverse --border --ansi \
+        --prompt='  Select container > ' \
+        --with-nth=2 \
+        --preview '
+          cid=$(echo {} | awk "{print \$1}")
+          name=$(echo {} | awk "{print \$2}")
+          echo "╭─ Container:  $name"
+          echo "│  ID:         $cid"
+          echo "│  Image:      $(docker inspect --format "{{.Config.Image}}" $cid 2>/dev/null)"
+          echo "│  Status:     $(docker inspect --format "{{.State.Status}}" $cid 2>/dev/null)"
+          echo "│  StartedAt:  $(docker inspect --format "{{.State.StartedAt}}" $cid 2>/dev/null)"
+          echo "│  IP:         $(docker inspect --format "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" $cid 2>/dev/null)"
+          echo "│"
+          echo "│  Last 30 log lines:"
+          docker logs --tail 30 $cid 2>&1 | sed "s/^/│    /"
+          echo "╰───────────────────────────────────────────────────────────"
+        ' \
+        --preview-window=right:70%:wrap \
+  | awk '{print $2}'
+}
 
-  if [[ -z $container ]]; then
+if [[ -z "$container" ]]; then
+  banner "dexec // neon shell injector"
+  container="$(select_container)"
+  if [[ -z "$container" ]]; then
     log_error "No container selected."
     exit 1
   fi
 fi
 
-# ─── Pick the Best Shell ────────────────────────────────────────────────────────
-typeset shell_found=""
-for sh_candidate in $SHELL_PREFS; do
-  if docker exec "$container" sh -c "command -v $sh_candidate" &> /dev/null; then
-    shell_found=$sh_candidate
-    break
-  fi
-done
+# Validate container is running
+if ! docker ps --format '{{.Names}}' | grep -Fxq -- "$container"; then
+  log_error "Container not running: $container"
+  exit 1
+fi
 
-if [[ -z $s]()]()
+# ─── Determine shell inside container ─────────────────────────────────────────
+pick_shell() {
+  local c="$1"
+  if [[ -n "$forced_shell" ]]; then
+    if docker exec "$c" sh -c "command -v $forced_shell" >/dev/null 2>&1; then
+      print -r -- "$forced_shell"; return 0
+    else
+      log_error "Forced shell '$forced_shell' not found in container."
+      return 1
+    fi
+  fi
+  local sh
+  for sh in $SHELL_PREFS; do
+    if docker exec "$c" sh -c "command -v $sh" >/dev/null 2>&1; then
+      print -r -- "$sh"; return 0
+    fi
+  done
+  # As a last-ditch, try /bin/sh existence
+  if docker exec "$c" sh -c 'test -x /bin/sh' >/dev/null 2>&1; then
+    print -r -- "/bin/sh"; return 0
+  fi
+  return 1
+}
+
+shell_found="$(pick_shell "$container")" || {
+  log_error "No usable shell found in $container."
+  exit 1
+}
+
+# ─── Build docker exec cmd ────────────────────────────────────────────────────
+typeset -a exec_cmd
+exec_cmd=(docker exec)
+
+# TTY handling
+if (( alloc_tty )); then
+  exec_cmd+=(-it)
+else
+  exec_cmd+=(-i)
+fi
+
+# user
+if [[ -n "$target_user" ]]; then
+  exec_cmd+=(-u "$target_user")
+fi
+
+# workdir
+if [[ -n "$workdir" ]]; then
+  exec_cmd+=(-w "$workdir")
+fi
+
+exec_cmd+=("$container")
+
+# If command is provided via --, run that in chosen shell -lc "CMD"
+if (( ${#passthru} )); then
+  # quote-safe: build single string
+  local cmd_str
+  cmd_str="${(j: :)passthru}"
+  exec_cmd+=("$shell_found" -lc "$cmd_str")
+else
+  exec_cmd+=("$shell_found" -l)
+fi
+
+# ─── Exec ─────────────────────────────────────────────────────────────────────
+(( quiet )) || log_info "Container: %F{magenta}$container%f  Shell: %F{yellow}$shell_found%f  $( ((target_user)) && print -n "User: %F{yellow}$target_user%f " )"
+
+# shellcheck disable=SC2292 # zsh array is fine
+"${exec_cmd[@]}"
+status=$?
+
+if (( status == 0 )); then
+  (( quiet )) || log_ok "Session ended cleanly."
+else
+  log_error "docker exec exited with status $status"
+fi
+
+exit $status
