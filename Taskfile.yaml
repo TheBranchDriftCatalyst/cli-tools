@@ -1,7 +1,6 @@
 version: 3
 
 vars:
-  CLI_VERSION: "0.1.0"
   CMD_SRC:
     sh: realpath ./cmd
   DEPLOY_BIN:
@@ -11,22 +10,27 @@ vars:
 
 tasks:
 
-  default:
-    desc: Run the build and deploy tasks
+  # default:
+  #   desc: Run the build and deploy tasks
+  #   cmds:
+  #   - echo {{ .DEPLOY_BIN }}
+  #   - task --list-all
+  deploy:path-shim:
+    desc: Deploy the path shim
     cmds:
-    - echo {{ .DEPLOY_BIN }}
-    - task --list-all
+    - ln -sf {{ .CLI_BIN }}/{{ base .ITEM }} {{ .DEPLOY_BIN }}/{{ base .ITEM }}
 
   build:
     desc: Build the CLI commands
     silent: false
     cmds:
     # - task: build:go
-    - task: build:shell
+    - task: shell:build
+    - task: go:build
     - task: permissions
-    - task: deploy-bin
+    # - task: deploy-bin
 
-  build:shell:
+  shell:build:
     silent: false
     desc: Build the shell scripts
     sources:
@@ -38,7 +42,7 @@ tasks:
       # cmd: echo {{ .DEPLOY_BIN }}/{{ trimPrefix "cmd/" (dir .ITEM) }}
       cmd: cp {{ .ITEM }} {{ .DEPLOY_BIN }}/{{ trimPrefix "cmd/" (dir .ITEM) }}
 
-  build:go:
+  go:build:
     desc: Build the CLI commands
     silent: false
     sources:
@@ -51,13 +55,13 @@ tasks:
       cmd: go build -o {{ .DEPLOY_BIN }}/{{ trimPrefix "cmd/" (dir .ITEM) }} {{ .ITEM }}
     - task: permissions
 
-  deploy-bin:
-    desc: Deploy the binary files
-    sources:
-    - "{{ .CLI_BIN }}/*"
-    cmds:
-    - for: sources
-      cmd: ln -sf {{ .ITEM }} {{ .DEPLOY_BIN }}/{{ base .ITEM }}
+  # deploy-bin:
+  #   desc: Deploy the binary files
+  #   sources:
+  #   - "{{ .CLI_BIN }}/*"
+  #   cmds:
+  #   - for: sources
+  #     cmd: ln -sf {{ .ITEM }} {{ .DEPLOY_BIN }}/{{ base .ITEM }}
 
   permissions:
     desc: Set permissions for the binary files
