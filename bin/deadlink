@@ -1,36 +1,101 @@
 #!/bin/bash
 #
-# @(#) deadlink v0.1.0
+# @(#) deadlink v0.2.0
 #
 # usage:
-#   deadlink [dir(s)]
+#   deadlink [options] [dir(s)]
 #
 # description:
 #   Remove the broken symlinks
 #
 ######################################################################
 
-# Help message
-if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-    echo "usage: deadlink [dir(s)]" 1>&2
-    echo "  Remove the broken symlinks within the directory given as arugment" 1>&2
-    echo "  If an argument is ommited, it defaults to the \$HOME(home directory)" 1>&2
-    exit
+DRY_RUN=false
+INTERACTIVE=true
+
+# Parse options
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -n|--dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        -y|--yes)
+            INTERACTIVE=false
+            shift
+            ;;
+        -h|--help)
+            echo "usage: deadlink [options] [dir(s)]" 1>&2
+            echo "  Remove broken symlinks within the given directories" 1>&2
+            echo "  If no directory is specified, defaults to \$HOME" 1>&2
+            echo "" 1>&2
+            echo "options:" 1>&2
+            echo "  -n, --dry-run    Show what would be removed without actually removing" 1>&2
+            echo "  -y, --yes        Skip interactive confirmation" 1>&2
+            echo "  -h, --help       Show this help message" 1>&2
+            exit 0
+            ;;
+        -*)
+            echo "Error: Unknown option $1" 1>&2
+            echo "Use --help for usage information" 1>&2
+            exit 1
+            ;;
+        *)
+            # This is a directory argument, stop parsing options
+            break
+            ;;
+    esac
+done
+
+# Set default directory if none provided
+DIRS=("${@:-$HOME}")
+
+# Count broken symlinks first
+broken_count=0
+for arg in "${DIRS[@]}"; do
+    for f in "$arg"/.??* "$arg"/*; do
+        [ -L "$f" ] && ! [ -e "$f" ] && ((broken_count++))
+    done
+done
+
+if [ $broken_count -eq 0 ]; then
+    echo "✅ No broken symlinks found in the specified directories."
+    exit 0
 fi
 
-# You may pass multiple directory arguments.
-for arg in "${@:-$HOME}"
-do
-    # Remove the hidden files and the regular files
-    for f in "$arg"/.??* "$arg"/*
-    do
-        # -L: check for a symlink; -h is the same flag
-        # -e: check for a validation of symlink;
-        #     -a flag is deprecated
-        #    ref to http://stackoverflow.com/questions/321348/bash-if-a-vs-e-option
+echo "🔍 Found $broken_count broken symlink(s)"
+
+if [ "$DRY_RUN" = true ]; then
+    echo "🧪 DRY RUN MODE - No files will be deleted"
+fi
+
+# Process directories
+for arg in "${DIRS[@]}"; do
+    echo "📁 Checking directory: $arg"
+
+    for f in "$arg"/.??* "$arg"/*; do
+        # -L: check for a symlink; -e: check for validation of symlink
         if [ -L "$f" ] && ! [ -e "$f" ]; then
-            # verbose and interactive
-            command rm -vi "$f"
+            if [ "$DRY_RUN" = true ]; then
+                echo "  🗑️  Would remove: $f"
+            else
+                if [ "$INTERACTIVE" = true ]; then
+                    echo "  🗑️  Remove broken symlink: $f"
+                    read -p "     Delete? [y/N] " -n 1 -r
+                    echo
+                    if [[ $REPLY =~ ^[Yy]$ ]]; then
+                        rm "$f" && echo "     ✅ Removed"
+                    else
+                        echo "     ⏭️  Skipped"
+                    fi
+                else
+                    rm "$f" && echo "  ✅ Removed: $f"
+                fi
+            fi
         fi
     done
 done
+
+if [ "$DRY_RUN" = true ]; then
+    echo "🧪 DRY RUN complete. Use without --dry-run to actually remove files."
+fi

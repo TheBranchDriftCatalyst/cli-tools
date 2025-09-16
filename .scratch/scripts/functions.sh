@@ -1,5 +1,8 @@
 #!/bin/zsh
 
+# TODO: get or set the catalyst worktools environment variable, or use default, also warn if not set 
+# TODO: also use fzf and sexify this
+
 function work_on() {
     local workspace_dir=".workspaces"
     local workspace_file
@@ -15,4 +18,3 @@ function work_on() {
         echo "No workspace selected."
     fi
 }
-

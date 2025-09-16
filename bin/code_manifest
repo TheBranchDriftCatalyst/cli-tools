@@ -1,5 +1,10 @@
 #!/usr/bin/env zsh
 
+# LOL early days of llm coding, this is a zsh script that generates a code manifest
+# and copies it to the clipboard. It processes files and directories, excluding certain patterns.
+# throw it in to a chat gpt and ask it to do whatever with your code.  Much better ways to do this
+# now
+
 # Exclusion dictionary constant: map file or folder patterns that should be excluded.
 # Using an associative array provides a clear and extendable way to manage exclusion patterns.
 typeset -A EXCLUDE_DICT=(
@@ -7,6 +12,21 @@ typeset -A EXCLUDE_DICT=(
   [".git"]="true"
   ["venv"]="true"
   ["__pycache__"]="true"
+  ["*.log"]="true"
+  ["*.tmp"]="true"
+  ["*.bak"]="true"
+  ["*.swp"]="true"
+  ["*.DS_Store"]="true"
+  ["*.zip"]="true"
+  ["*.tar.gz"]="true"
+  ["*.tgz"]="true"
+  ["*.rar"]="true"
+  ["*.7z"]="true"
+  [".idea"]="true"
+  [".vscode"]="true"
+  [".cache"]="true"
+  [".env"]="true"
+  ["web"]="true"
 )
 
 # Function to determine if a file should be excluded based on its path.
@@ -22,7 +42,6 @@ should_exclude() {
   done
   return 1  # File does not match any exclusion pattern.
 }
-
 
 # Function to determine the appropriate clipboard command.
 copy_to_clipboard() {
@@ -40,7 +59,7 @@ copy_to_clipboard() {
 
 # Check if at least one argument is provided.
 if [ $# -eq 0 ]; then
-  echo "Usage: $0 <file_or_directory1> [file_or_directory2 ...]"
+  echo "Usage: $0 <glob_pattern1> [glob_pattern2 ...]"
   exit 1
 fi
 
@@ -65,17 +84,20 @@ process_file() {
   fi
 }
 
-# Iterate over each provided argument.
-for item in "$@"; do
-  if [ -d "$item" ]; then
-    # If it's a directory, find all files within it.
-    while IFS= read -r -d '' file; do
-      process_file "$file"
-    done < <(find "$item" -type f -print0)
-  else
-    # If it's a file, process it directly.
-    process_file "$item"
-  fi
+# Iterate over each glob pattern argument.
+for glob in "$@"; do
+  # Use zsh's globbing to match files and directories based on the pattern.
+  for item in ${(z)glob}; do
+    if [ -d "$item" ]; then
+      # If it's a directory, find all files within it.
+      while IFS= read -r -d '' file; do
+        process_file "$file"
+      done < <(find "$item" -type f -print0)
+    else
+      # If it's a file, process it directly.
+      process_file "$item"
+    fi
+  done
 done
 
 # Copy the output to the clipboard.

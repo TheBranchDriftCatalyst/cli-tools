@@ -69,7 +69,7 @@ func main() {
 
 // expandPath expands the ~ to the user's home directory
 func expandPath(path string) string {
-	if path[:2] == "~/" {
+	if len(path) >= 2 && path[:2] == "~/" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			log.Fatalf("Error getting user home directory: %v", err)

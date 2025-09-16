@@ -1,7 +1,6 @@
 package main_test
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,7 +17,7 @@ func TestMoveAndSymlink(t *testing.T) {
 	defer os.RemoveAll(tmpDir) // Clean up
 
 	// Create a temporary file in the temp directory
-	tmpFile, err := ioutil.TempFile(tmpDir, "testfile")
+	tmpFile, err := os.CreateTemp(tmpDir, "testfile")
 	if err != nil {
 		t.Fatalf("Error creating temp file: %v", err)
 	}
@@ -66,7 +65,7 @@ func TestMoveAndSymlink(t *testing.T) {
 	}
 
 	// Read and parse the manifest file
-	manifestData, err := ioutil.ReadFile(manifestPath)
+	manifestData, err := os.ReadFile(manifestPath)
 	if err != nil {
 		t.Fatalf("Error reading manifest file: %v", err)
 	}

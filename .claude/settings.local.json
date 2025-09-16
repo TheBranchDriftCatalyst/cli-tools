@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go mod:*)",
+      "Bash(task build:*)",
+      "Bash(for f in bin/*)",
+      "Bash(do echo \"=== $f ===\")",
+      "Bash(head:*)",
+      "Bash(done)",
+      "Read(//Users/panda/bin/**)",
+      "Bash(echo $PATH)",
+      "Read(//Users/panda/catalyst-devspace/catalyst/@dotfiles-2024/dotfiles/**)",
+      "Bash(echo $SHELL)",
+      "Read(//Users/panda/**)",
+      "Bash(chmod:*)",
+      "Bash(task install:*)",
+      "Bash(go:*)",
+      "Bash(./install.sh)",
+      "Bash(code:*)",
+      "Bash(./uninstall.sh:*)",
+      "Bash(jobs)",
+      "Bash(git add:*)",
+      "Bash(git rebase:*)",
+      "Bash(GIT_EDITOR=true git rebase --continue)",
+      "Bash(git diff:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

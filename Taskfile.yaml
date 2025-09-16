@@ -3,22 +3,26 @@ version: 3
 vars:
   CMD_SRC:
     sh: realpath ./cmd
-  DEPLOY_BIN:
+  REAL_BIN:
+    # NOTE that this is out of repo scope!!!! for now
     sh: realpath ~/bin
-  CLI_BIN:
+  LOCAL_BIN:
     sh: realpath ./bin
 
 tasks:
 
-  # default:
-  #   desc: Run the build and deploy tasks
-  #   cmds:
-  #   - echo {{ .DEPLOY_BIN }}
-  #   - task --list-all
-  deploy:path-shim:
-    desc: Deploy the path shim
+  default:
+    desc: Run the build and deploy tasks
+    silent: true
     cmds:
-    - ln -sf {{ .CLI_BIN }}/{{ base .ITEM }} {{ .DEPLOY_BIN }}/{{ base .ITEM }}
+    # TODO: make this default display sexier, with task names as well
+    - "echo \"REAL_BIN: {{ .REAL_BIN }}\""
+    - "echo \"LOCAL_BIN: {{ .LOCAL_BIN }}\""
+
+  clean:caches:
+    desc: Clean the caches
+    cmds:
+    - rm -rf .task
 
   build:
     desc: Build the CLI commands
@@ -47,31 +51,47 @@ tasks:
     silent: false
     sources:
     - "{{ .CMD_SRC }}/**/main.go"
-    # generates:
-    # - "{{ .DEPLOY_BIN }}/*"
+    generates:
+    - "{{ .LOCAL_BIN }}/*"
     cmds:
     - for: sources
-      # cmd: echo {{ .DEPLOY_BIN }}/{{ trimPrefix "cmd/" (dir .ITEM) }}
-      cmd: go build -o {{ .DEPLOY_BIN }}/{{ trimPrefix "cmd/" (dir .ITEM) }} {{ .ITEM }}
+      # cmd: echo {{ .LOCAL_BIN }}/{{ trimPrefix "cmd/" (dir .ITEM) }}
+      cmd: go build -o {{ .LOCAL_BIN }}/{{ trimPrefix "cmd/" (dir .ITEM) }} {{ .ITEM }}
     - task: permissions
 
-  # deploy-bin:
-  #   desc: Deploy the binary files
-  #   sources:
-  #   - "{{ .CLI_BIN }}/*"
-  #   cmds:
-  #   - for: sources
-  #     cmd: ln -sf {{ .ITEM }} {{ .DEPLOY_BIN }}/{{ base .ITEM }}
+  organize:
+    desc: Move shell scripts from bin/ to shell/ directory
+    cmds:
+    - |
+      for script in bin/*.sh bin/*.py; do
+        [ -f "$script" ] && mv "$script" shell/ && echo "Moved $(basename $script) to shell/"
+      done
+
+  install:
+    deps: [ build, permissions ]
+    desc: Install CLI tools to PATH via zshrc
+    cmds:
+    - ./install.sh
+
+  uninstall:
+    desc: Remove CLI tools from PATH
+    cmds:
+    - ./uninstall.sh
+
+  deploy:
+    deps: [ build, permissions ]
+    desc: "[DEPRECATED] Use 'task install' instead. Legacy symlink deployment."
+    sources:
+    - "{{ .LOCAL_BIN }}/*"
+    generates:
+    - "{{ .REAL_BIN }}/*"
+    cmds:
+    - for: sources
+      cmd: ln -sf $(realpath {{ .ITEM }}) {{ .REAL_BIN }}/{{ base .ITEM}}
 
   permissions:
     desc: Set permissions for the binary files
-    sources: [ "{{ .CLI_BIN }}/*", "./scripts/*" ]
+    sources: [ "{{ .LOCAL_BIN }}/*", "shell/*" ]
     cmds:
     - for: sources
       cmd: chmod +x {{ .ITEM }}
-
-  build:package:
-    desc: Build the package
-    cmds:
-    - echo "Building package..."
-    - task: "./scripts/*"

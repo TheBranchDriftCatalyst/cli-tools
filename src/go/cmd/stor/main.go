@@ -63,9 +63,18 @@ func main() {
 		log.Fatalf("Error moving file or directory to final destination: %v", err)
 	}
 
-	// Ensure no existing file at the original path
-	if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
-		log.Fatalf("Error removing existing file at original path: %v", err)
+	// Check if there's already a file at the original path and validate it's safe to remove
+	if info, err := os.Lstat(absPath); err == nil {
+		// Only remove if it's a symlink (safer than removing arbitrary files)
+		if info.Mode()&os.ModeSymlink != 0 {
+			if err := os.Remove(absPath); err != nil {
+				log.Fatalf("Error removing existing symlink at original path: %v", err)
+			}
+		} else {
+			log.Fatalf("File already exists at original path and is not a symlink: %s", absPath)
+		}
+	} else if !os.IsNotExist(err) {
+		log.Fatalf("Error checking original path: %v", err)
 	}
 
 	// Create a symlink back to its original location

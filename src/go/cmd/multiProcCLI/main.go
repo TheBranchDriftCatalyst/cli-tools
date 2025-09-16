@@ -181,8 +181,21 @@ func setupProcesses(commands []string) []*Process {
 }
 
 func runProcess(p *Process, index int) {
-	stdout, _ := p.Cmd.StdoutPipe()
-	stderr, _ := p.Cmd.StderrPipe()
+	stdout, err := p.Cmd.StdoutPipe()
+	if err != nil {
+		p.LogChan <- fmt.Sprintf("Error creating stdout pipe: %v", err)
+		p.Status = "Error"
+		updateUI(index)
+		return
+	}
+
+	stderr, err := p.Cmd.StderrPipe()
+	if err != nil {
+		p.LogChan <- fmt.Sprintf("Error creating stderr pipe: %v", err)
+		p.Status = "Error"
+		updateUI(index)
+		return
+	}
 
 	go captureOutput(stdout, p.LogChan, p)
 	go captureOutput(stderr, p.ErrChan, p)
