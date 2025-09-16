@@ -20,9 +20,7 @@
       "Bash(./uninstall.sh:*)",
       "Bash(jobs)",
       "Bash(git add:*)",
-      "Bash(git rebase:*)",
-      "Bash(GIT_EDITOR=true git rebase --continue)",
-      "Bash(git diff:*)"
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []
