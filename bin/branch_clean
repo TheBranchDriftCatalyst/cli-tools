@@ -3,10 +3,12 @@ set -euo pipefail
 
 # ───────────────────────── Config / Defaults ─────────────────────────
 REMOTE="origin"; AUTHOR_RE=""; ONLY="all"; BASE=""
-HELP=0; RAW=0; NO_COLUMN=0
+HELP=0; RAW=0; NO_COLUMN=0; INTERACTIVE=0; CACHE_PR=0; DRY_RUN=0
 LOG_LEVEL="info"    # info|debug|trace
 COLOR_MODE="auto"   # auto|always|never
 SORT_COL=""; SORT_DESC=0
+PR_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/branch_clean"
+PR_CACHE_TTL=3600  # Cache TTL in seconds (default: 1 hour)
 
 # Widths when RAW=0 (prevent macOS column choking)
 W_BRANCH=60; W_SCOPE=6; W_UPSTREAM=48; W_UPSTREAMDATE=18
@@ -20,7 +22,16 @@ while [ $# -gt 0 ]; do
     -b|--base)   BASE="${2:-}"; shift 2;;
     --locals-only) ONLY="local"; shift;;
     --remotes-only) ONLY="remote"; shift;;
-    --sort) SORT_COL="${2:-}"; shift 2;;
+    -i|--interactive) INTERACTIVE=1; shift;;
+    --cache-pr) CACHE_PR=1; shift;;
+    --dry-run) DRY_RUN=1; shift;;
+    --sort) 
+      VALID_SORTS="branch|scope|upstream|upstream_updated|merged|pr|pr_state|last_update|email"
+      if [ -n "${2:-}" ] && ! printf '%s' "$VALID_SORTS" | grep -qE "(^|\\|)${2}(\\||$)"; then
+        printf 'Invalid --sort value: %s. Valid options: %s\n' "$2" "$VALID_SORTS" >&2
+        exit 2
+      fi
+      SORT_COL="${2:-}"; shift 2;;
     --desc) SORT_DESC=1; shift;;
     --raw) RAW=1; shift;;
     --no-column) NO_COLUMN=1; shift;;
@@ -41,6 +52,9 @@ Usage: branch_clean [options]
   -b, --base BRANCH        Base to compare merge against (default: repo default)
       --locals-only        Only local branches
       --remotes-only       Only remote branches
+  -i, --interactive        Interactive mode with fzf (select branches to act on)
+      --cache-pr           Cache PR data to avoid repeated GitHub API calls (1hr TTL)
+      --dry-run            Show what would be deleted without actually deleting (use with -i)
       --sort COL           Sort by: branch|scope|upstream|upstream_updated|merged|pr|pr_state|last_update|email
       --desc               Sort descending
       --raw                Disable truncation (very long lines)
@@ -50,7 +64,9 @@ Usage: branch_clean [options]
       --debug|--trace      Shorthand for higher log verbosity
 Notes:
   * Dates are relative across all ranges (min, hr, day, week, month, year).
-  * PR columns use GitHub `gh` + `jq`. If unavailable/empty, they’re "-".
+  * PR columns use GitHub `gh` + `jq`. If unavailable/empty, they're "-".
+  * Interactive mode requires `fzf` (brew install fzf).
+  * PR cache is stored in ${XDG_CACHE_HOME:-$HOME/.cache}/branch_clean/
 EOF
   exit 0
 fi
@@ -111,20 +127,81 @@ HAVE_GH=0; HAVE_JQ=0
 command -v gh >/dev/null 2>&1 && HAVE_GH=1
 command -v jq >/dev/null 2>&1 && HAVE_JQ=1
 PRMAP=$(mktemp 2>/dev/null || mktemp -t prmap)
-trap 'rm -f "$PRMAP" "$OUT" "$REFDATE" "$SORTED" "$TMP_PRINT" 2>/dev/null || true' EXIT
+TMP_PRINT=""
+UPSTREAMS_TMP=""
+trap 'rm -f "$PRMAP" "$OUT" "$REFDATE" "$SORTED" "$TMP_PRINT" "$UPSTREAMS_TMP" "$PREVIEW_TMP" 2>/dev/null || true' EXIT
+
+# Determine cache file path based on repo
+PR_CACHE_FILE=""
+USE_CACHE=0
+if [ $CACHE_PR -eq 1 ]; then
+  # Get repo identifier (owner/repo from remote URL)
+  REPO_ID=$(git config --get remote.${REMOTE}.url 2>/dev/null || git remote get-url "$REMOTE" 2>/dev/null || echo "unknown")
+  # Sanitize to create filename
+  REPO_HASH=$(printf '%s' "$REPO_ID" | shasum -a 256 | cut -d' ' -f1)
+  PR_CACHE_FILE="${PR_CACHE_DIR}/pr_cache_${REPO_HASH}.json"
+  
+  # Create cache directory if needed
+  if [ ! -d "$PR_CACHE_DIR" ]; then
+    mkdir -p "$PR_CACHE_DIR" 2>/dev/null || warn "Failed to create cache dir: $PR_CACHE_DIR"
+  fi
+  
+  # Check if cache exists and is fresh
+  if [ -f "$PR_CACHE_FILE" ]; then
+    CACHE_AGE=$(( $(date +%s) - $(stat -f%m "$PR_CACHE_FILE" 2>/dev/null || stat -c%Y "$PR_CACHE_FILE" 2>/dev/null || echo 0) ))
+    if [ "$CACHE_AGE" -lt "$PR_CACHE_TTL" ]; then
+      USE_CACHE=1
+      info "Using cached PR data (age: ${CACHE_AGE}s, TTL: ${PR_CACHE_TTL}s)"
+    else
+      dbg "Cache expired (age: ${CACHE_AGE}s > TTL: ${PR_CACHE_TTL}s)"
+    fi
+  fi
+fi
 
 PR_COUNT=0
 if [ $HAVE_GH -eq 1 ] && [ $HAVE_JQ -eq 1 ]; then
-  if pr_json=$(gh pr list --state all --json number,state,headRefName --limit 1000 2>/dev/null); then
-    PR_COUNT=$(printf '%s' "$pr_json" | jq 'length' 2>/dev/null || echo 0)
-    if [ "$PR_COUNT" -gt 0 ]; then
-      printf '%s' "$pr_json" | jq -r '.[] | "\(.headRefName)\t\(.number)\t\(.state)"' > "$PRMAP" || true
-      info "Loaded $PR_COUNT PRs via gh."
+  if [ $USE_CACHE -eq 1 ] && [ -f "$PR_CACHE_FILE" ]; then
+    # Load from cache (already in TSV format, no jq needed!)
+    if cat "$PR_CACHE_FILE" > "$PRMAP" 2>/dev/null; then
+      PR_COUNT=$(wc -l < "$PRMAP" | tr -d ' ')
+      if [ "$PR_COUNT" -gt 0 ]; then
+        info "Loaded $PR_COUNT PRs from cache."
+      fi
     else
-      warn "gh returned 0 PRs; auth/context may be missing. Try: gh auth status; gh repo view"
+      warn "Failed to read cache file, fetching fresh data..."
+      USE_CACHE=0
     fi
-  else
-    warn "gh pr list failed; PR columns will be '-'."
+  fi
+  
+  # Fetch fresh data if not using cache
+  if [ $USE_CACHE -eq 0 ]; then
+    PR_ERR=$(mktemp 2>/dev/null || mktemp -t prerr)
+    if pr_json=$(gh pr list --state all --json number,state,headRefName --limit 1000 2>"$PR_ERR"); then
+      # Transform with jq once and save directly to PRMAP
+      if printf '%s' "$pr_json" | jq -r '.[] | "\(.headRefName)\t\(.number)\t\(.state)"' > "$PRMAP" 2>/dev/null; then
+        PR_COUNT=$(wc -l < "$PRMAP" | tr -d ' ')
+        if [ "$PR_COUNT" -gt 0 ]; then
+          info "Loaded $PR_COUNT PRs via gh."
+          
+          # Save to cache if --cache-pr was used (save the TSV, not JSON!)
+          if [ $CACHE_PR -eq 1 ] && [ -n "$PR_CACHE_FILE" ]; then
+            cp "$PRMAP" "$PR_CACHE_FILE" 2>/dev/null && dbg "Cached PR data to $PR_CACHE_FILE" || warn "Failed to write cache"
+          fi
+        else
+          warn "gh returned 0 PRs; auth/context may be missing. Try: gh auth status; gh repo view"
+        fi
+      else
+        warn "jq transformation failed"
+      fi
+    else
+      PR_ERR_MSG=$(sed -n '1,4p' "$PR_ERR" | tr -d '\n')
+      if [ -z "$PR_ERR_MSG" ]; then
+        warn "gh pr list failed; PR columns will be '-'."
+      else
+        warn "gh pr list failed; PR columns will be '-'. gh error: $PR_ERR_MSG"
+      fi
+    fi
+    rm -f "$PR_ERR" 2>/dev/null || true
   fi
 else
   warn "gh+jq not available; PR columns will be '-'."
@@ -132,7 +209,27 @@ fi
 
 # ───────────────────────── Upstream date map ─────────────────────────
 REFDATE=$(mktemp 2>/dev/null || mktemp -t refdate)
-git for-each-ref --format='%(refname)	%(committerdate:iso-strict)' refs/heads refs/remotes > "$REFDATE"
+git for-each-ref --format='%(refname)\t%(committerdate:iso-strict)' refs/heads refs/remotes > "$REFDATE"
+
+# Build a list of upstream short names for local branches so we can skip the
+# corresponding remote refs (avoids duplicate rows where a remote appears
+# both as its own row and as the upstream column for a local branch).
+UPSTREAMS_TMP=$(mktemp 2>/dev/null || mktemp -t upstreams)
+git for-each-ref --format='%(upstream:short)' refs/heads | awk 'NF{print}' > "$UPSTREAMS_TMP"
+
+# Derive PR URL base (assumes GitHub) so PR numbers can be rendered as
+# clickable links in supporting terminals.
+PR_URL_BASE=""
+REPO_URL=$(git config --get remote.${REMOTE}.url 2>/dev/null || git remote get-url "$REMOTE" 2>/dev/null || true)
+if [ -n "$REPO_URL" ]; then
+  if [[ "$REPO_URL" =~ github\.com[:/]([^/]+/[^/]+)(\.git)?$ ]]; then
+    OWNER_REPO="${BASH_REMATCH[1]}"
+    PR_URL_BASE="https://github.com/${OWNER_REPO}/pull/"
+  else
+    R=$(printf '%s' "$REPO_URL" | sed -E 's#(git@[^:]+:|https?://[^/]+/)##; s#\.git$##')
+    if [ -n "$R" ]; then PR_URL_BASE="https://github.com/${R}/pull/"; fi
+  fi
+fi
 
 # ───────────────────────── Date helpers ──────────────────────────────
 norm_tz(){ echo "${1}" | sed -E 's@([+-][0-9]{2}):([0-9]{2})$@\1\2@'; }
@@ -143,6 +240,7 @@ rel_or_iso(){
   local now epoch delta; now=$(date +%s)
   if ! epoch=$(to_epoch "$iso" 2>/dev/null); then echo "${iso%%T*}"; return; fi
   delta=$(( now - epoch )); [ $delta -lt 0 ] && delta=$(( -delta ))
+  # Time constants for readability
   local m=$((60)); local h=$((60*m)); local d=$((24*h)); local w=$((7*d))
   local mo=$((30*d)); local y=$((365*d))
   if   [ $delta -lt $m ]; then echo "just now"
@@ -165,6 +263,13 @@ printf "BRANCH\tSCOPE\tUPSTREAM\tUPSTREAM_UPDATED\tMERGED->%s\tPR\tPR_STATE\tLAS
 while IFS="$SEP" read -r REF FULL UPSTREAM LASTISO AEMAIL; do
   [ "$REF" = "refs/remotes/${REMOTE}/HEAD" ] && continue
   case "$REF" in refs/heads/*) SCOPE="local";; refs/remotes/*) SCOPE="remote";; *) SCOPE="-";; esac
+
+  # Skip remote refs that are upstreams of local branches to avoid duplicates
+  if [ "$SCOPE" = "remote" ] && [ -s "$UPSTREAMS_TMP" ]; then
+    if grep -Fxq "$FULL" "$UPSTREAMS_TMP" 2>/dev/null; then
+      continue
+    fi
+  fi
 
   [ -n "$AUTHOR_RE" ] && printf '%s\n' "$AEMAIL" | grep -qiE -- "$AUTHOR_RE" || { [ -n "$AUTHOR_RE" ] && continue; }
 
@@ -265,26 +370,243 @@ render_plain() {
   fi
 }
 
-if [ "$DO_COLR" -eq 0 ]; then
-  render_plain
-else
-  TMP_PRINT=$(mktemp 2>/dev/null || mktemp -t printout)
-  render_plain > "$TMP_PRINT"
-  # Colorize after alignment without adding/removing characters
-  awk -v hdr="$C_HDR" -v loc="$C_LOC" -v rem="$C_REM" -v ok="$C_OK" -v no="$C_NO" -v cy="$C_CY" -v dim="$C_DIM" -v rst="$C_RST" '
-    NR==1 { print hdr $0 rst; next }
-    {
-      gsub(/\<local\>/,  loc "local" rst);
-      gsub(/\<remote\>/, rem "remote" rst);
-      gsub(/\<YES\>/,    ok "YES" rst);
-      gsub(/\<yes\>/,    ok "yes" rst);
-      gsub(/\<NO\>/,     no "NO" rst);
-      gsub(/\<no\>/,     no "no" rst);
-      gsub(/\<open\>/,   ok "open" rst);
-      gsub(/\<merged\>/, cy "merged" rst);
-      gsub(/\<closed\>/, no "closed" rst);
-      gsub(/\<draft\>/,  dim "draft" rst);
-      print
-    }' "$TMP_PRINT"
-  rm -f "$TMP_PRINT"
+render_output() {
+  if [ "$DO_COLOR" -eq 0 ]; then
+    render_plain
+  else
+    TMP_PRINT=$(mktemp 2>/dev/null || mktemp -t printout)
+    render_plain > "$TMP_PRINT"
+    # Colorize after alignment without adding/removing characters
+    awk -v hdr="$C_HDR" -v loc="$C_LOC" -v rem="$C_REM" -v ok="$C_OK" -v no="$C_NO" -v cy="$C_CY" -v dim="$C_DIM" -v rst="$C_RST" '
+      NR==1 { print hdr $0 rst; next }
+      {
+        gsub(/\<local\>/,  loc "local" rst);
+        gsub(/\<remote\>/, rem "remote" rst);
+        gsub(/\<YES\>/,    ok "YES" rst);
+        gsub(/\<yes\>/,    ok "yes" rst);
+        gsub(/\<NO\>/,     no "NO" rst);
+        gsub(/\<no\>/,     no "no" rst);
+        gsub(/\<open\>/,   ok "open" rst);
+        gsub(/\<merged\>/, cy "merged" rst);
+        gsub(/\<closed\>/, no "closed" rst);
+        gsub(/\<draft\>/,  dim "draft" rst);
+        print
+      }' "$TMP_PRINT" > "${TMP_PRINT}.colored"
+    
+    # If we have a PR URL base and perl is available, make PR numbers clickable with OSC8
+    if [ -n "$PR_URL_BASE" ] && command -v perl >/dev/null 2>&1; then
+      # OSC8: \e]8;;URL\e\\TEXT\e]8;;\e\\
+      if perl -pe 's/(#(\d+))/sprintf("\e]8;;%s%s\e\\%s\e]8;;\e\\", $ENV{PR_URL_BASE}, $2, $1)/ge' "${TMP_PRINT}.colored" 2>/dev/null; then
+        rm -f "${TMP_PRINT}.colored"
+      else
+        cat "${TMP_PRINT}.colored"
+        rm -f "${TMP_PRINT}.colored"
+      fi
+    else
+      cat "${TMP_PRINT}.colored"
+      rm -f "${TMP_PRINT}.colored"
+    fi
+    rm -f "$TMP_PRINT"
+  fi
+}
+
+# ───────────────────────── Interactive Mode ─────────────────────────
+if [ "$INTERACTIVE" -eq 1 ]; then
+  if ! command -v fzf >/dev/null 2>&1; then
+    echo "Error: Interactive mode requires 'fzf'. Install with: brew install fzf" >&2
+    exit 1
+  fi
+  
+  if [ $DRY_RUN -eq 1 ]; then
+    info "Entering interactive mode (DRY RUN - no changes will be made)"
+  else
+    info "Entering interactive mode (press ESC to exit)..."
+  fi
+  
+  # Generate preview content without colors for fzf
+  PREVIEW_TMP=$(mktemp 2>/dev/null || mktemp -t preview)
+  if [ $NO_COLUMN -eq 0 ] && command -v column >/dev/null 2>&1; then
+    column -t -s $'\t' < "$SORTED" > "$PREVIEW_TMP"
+  else
+    cat "$SORTED" > "$PREVIEW_TMP"
+  fi
+  
+  # Use fzf for interactive selection
+  SELECTED=$(tail -n +2 "$PREVIEW_TMP" | \
+    fzf --ansi \
+        --multi \
+        --header="Select branches to DELETE (TAB for multi-select, ENTER to confirm)" \
+        --preview='echo "Selected: {}" | head -20' \
+        --preview-window=up:3:wrap \
+        --bind='ctrl-a:select-all,ctrl-d:deselect-all' \
+        --height=100%)
+  
+  rm -f "$PREVIEW_TMP"
+  
+  if [ -n "$SELECTED" ]; then
+    # ──────────────── Confirmation Table ────────────────
+    echo ""
+    echo "${C_HDR}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RST}"
+    echo "${C_HDR}Review Selected Branches for Deletion${C_RST}"
+    echo "${C_HDR}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RST}"
+    echo ""
+    
+    # Create confirmation table
+    CONFIRM_TMP=$(mktemp 2>/dev/null || mktemp -t confirm)
+    printf "# \tBRANCH\tSCOPE\tMERGED\tPR\n" > "$CONFIRM_TMP"
+    
+    COUNT=0
+    while IFS= read -r line; do
+      COUNT=$((COUNT + 1))
+      BRANCH=$(echo "$line" | awk '{print $1}')
+      SCOPE=$(echo "$line" | awk '{print $2}')
+      MERGED=$(echo "$line" | awk '{print $5}')
+      PR=$(echo "$line" | awk '{print $6}')
+      
+      printf "%d\t%s\t%s\t%s\t%s\n" "$COUNT" "$BRANCH" "$SCOPE" "$MERGED" "$PR" >> "$CONFIRM_TMP"
+    done <<< "$SELECTED"
+    
+    # Display the table
+    if command -v column >/dev/null 2>&1; then
+      column -t -s $'\t' < "$CONFIRM_TMP"
+    else
+      cat "$CONFIRM_TMP"
+    fi
+    rm -f "$CONFIRM_TMP"
+    
+    echo ""
+    echo "${C_HDR}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RST}"
+    
+    # Confirmation prompt (skip in dry-run mode)
+    if [ $DRY_RUN -eq 0 ]; then
+      echo ""
+      echo -n "${C_NO}⚠ WARNING: This will delete $COUNT branch(es).${C_RST} Continue? (y/N): "
+      read -r CONFIRM
+      echo ""
+      
+      if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+        echo "${C_CY}Deletion cancelled by user.${C_RST}"
+        exit 0
+      fi
+    fi
+    
+    # ──────────────── Proceed with Deletion ────────────────
+    echo ""
+    echo "${C_HDR}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RST}"
+    if [ $DRY_RUN -eq 1 ]; then
+      echo "${C_HDR}DRY RUN - Branch Deletion Preview${C_RST}"
+    else
+      echo "${C_HDR}Deleting Selected Branches${C_RST}"
+    fi
+    echo "${C_HDR}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RST}"
+    echo ""
+    
+    # Track statistics
+    TOTAL=0; SUCCESS_LOCAL=0; SUCCESS_REMOTE=0; SKIPPED=0; FAILED=0
+    
+    # Process each selected line
+    while IFS= read -r line; do
+      TOTAL=$((TOTAL + 1))
+      
+      # Extract branch name and scope (first two columns)
+      BRANCH=$(echo "$line" | awk '{print $1}')
+      SCOPE=$(echo "$line" | awk '{print $2}')
+      
+      echo "${C_CY}[$TOTAL] Branch:${C_RST} $BRANCH ${C_DIM}(${SCOPE})${C_RST}"
+      
+      # Get current branch to prevent self-deletion
+      CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+      
+      # Safety check: don't delete current branch
+      if [ "$BRANCH" = "$CURRENT_BRANCH" ]; then
+        echo "  ${C_NO}⚠ SKIP:${C_RST} Cannot delete current branch"
+        SKIPPED=$((SKIPPED + 1))
+        echo ""
+        continue
+      fi
+      
+      # Safety check: don't delete base branch
+      if [ "$BRANCH" = "$BASE" ]; then
+        echo "  ${C_NO}⚠ SKIP:${C_RST} Cannot delete base branch ($BASE)"
+        SKIPPED=$((SKIPPED + 1))
+        echo ""
+        continue
+      fi
+      
+      # Delete based on scope
+      case "$SCOPE" in
+        local)
+          if [ $DRY_RUN -eq 1 ]; then
+            echo "  ${C_DIM}[DRY RUN]${C_RST} Would run: ${C_CY}git branch -D ${BRANCH}${C_RST}"
+            SUCCESS_LOCAL=$((SUCCESS_LOCAL + 1))
+          else
+            if git branch -D "$BRANCH" >/dev/null 2>&1; then
+              echo "  ${C_OK}✓ Deleted local branch${C_RST}"
+              SUCCESS_LOCAL=$((SUCCESS_LOCAL + 1))
+            else
+              echo "  ${C_NO}✗ Failed to delete local branch${C_RST}"
+              FAILED=$((FAILED + 1))
+            fi
+          fi
+          ;;
+          
+        remote)
+          # Delete remote tracking branch locally
+          
+          if [ $DRY_RUN -eq 1 ]; then
+            echo "  ${C_DIM}[DRY RUN]${C_RST} Would run: ${C_CY}git branch -D --remote ${BRANCH}${C_RST}"
+            SUCCESS_REMOTE=$((SUCCESS_REMOTE + 1))
+          else
+            if git branch -D --remote "$BRANCH" >/dev/null 2>&1; then
+              echo "  ${C_OK}✓ Deleted remote tracking branch${C_RST}"
+              SUCCESS_REMOTE=$((SUCCESS_REMOTE + 1))
+            else
+              echo "  ${C_NO}✗ Failed to delete remote tracking branch${C_RST}"
+              FAILED=$((FAILED + 1))
+            fi
+          fi
+          ;;
+          
+        *)
+          echo "  ${C_NO}⚠ SKIP:${C_RST} Unknown scope: $SCOPE"
+          SKIPPED=$((SKIPPED + 1))
+          ;;
+      esac
+      
+      echo ""
+      
+    done <<< "$SELECTED"
+    
+    # Summary
+    echo "${C_HDR}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RST}"
+    echo "${C_HDR}Summary${C_RST}"
+    echo "${C_HDR}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RST}"
+    echo "Total selected:        $TOTAL"
+    if [ $DRY_RUN -eq 1 ]; then
+      echo "${C_DIM}Would delete local:    $SUCCESS_LOCAL${C_RST}"
+      echo "${C_DIM}Would delete remote:   $SUCCESS_REMOTE${C_RST}"
+    else
+      echo "${C_OK}Deleted local:         $SUCCESS_LOCAL${C_RST}"
+      echo "${C_OK}Deleted remote:        $SUCCESS_REMOTE${C_RST}"
+      if [ $FAILED -gt 0 ]; then
+        echo "${C_NO}Failed:                $FAILED${C_RST}"
+      fi
+    fi
+    if [ $SKIPPED -gt 0 ]; then
+      echo "${C_NO}Skipped:               $SKIPPED${C_RST}"
+    fi
+    echo "${C_HDR}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RST}"
+    
+    if [ $DRY_RUN -eq 1 ]; then
+      echo ""
+      echo "${C_CY}💡 Tip: Remove --dry-run flag to actually delete these branches${C_RST}"
+    fi
+  else
+    info "No branches selected."
+  fi
+  
+  exit 0
 fi
+
+# ───────────────────────── Normal Output ────────────────────────────
+render_output
