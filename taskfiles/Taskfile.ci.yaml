@@ -1,0 +1,17 @@
+version: 3
+
+tasks:
+  checks:
+    desc: Run all CI quality checks
+    cmds:
+      - task: test:lint
+      - task: test:coverage
+
+  pre-release:
+    desc: Prepare for release - clean, build, test, lint
+    cmds:
+      - task: clean:all
+      - task: build
+      - task: test:all
+      - task: test:lint
+      - echo "All checks passed! Ready for release."

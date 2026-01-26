@@ -1,0 +1,63 @@
+version: 3
+
+tasks:
+  setup:
+    desc: Set up development environment
+    cmds:
+      - |
+        echo "Setting up development environment..."
+        command -v go >/dev/null 2>&1 || (echo "Please install Go" && exit 1)
+        command -v task >/dev/null 2>&1 || (echo "Please install Task: brew install go-task/tap/go-task" && exit 1)
+        echo "Optional: Install bats-core for advanced shell testing: brew install bats-core"
+        echo "Optional: Install golangci-lint for Go linting: brew install golangci-lint"
+        echo "Optional: Install shellcheck for shell linting: brew install shellcheck"
+
+  cycle:
+    desc: Quick development cycle - format, vet, fast tests
+    cmds:
+      - task: go:fmt
+      - task: go:vet
+      - task: test:fast
+
+  docs:
+    desc: Show available documentation
+    cmds:
+      - |
+        echo "Documentation available in:"
+        echo "  - README.md (project overview)"
+        echo "  - TESTING.md (testing guide)"
+        echo "  - CLAUDE.md (AI assistant instructions)"
+
+  help:
+    desc: Show help message with available tasks
+    silent: true
+    cmds:
+      - |
+        echo "CLI Tools Taskfile"
+        echo ""
+        echo "Usage: task <target>"
+        echo ""
+        echo "Main targets:"
+        echo "  build              Build all CLI tools"
+        echo "  test:all           Run all tests"
+        echo "  install            Install CLI tools system-wide"
+        echo "  clean:all          Clean all artifacts"
+        echo ""
+        echo "Development:"
+        echo "  dev:setup          Set up development environment"
+        echo "  dev:cycle          Quick dev cycle (format, vet, fast tests)"
+        echo "  go:fmt             Format Go code"
+        echo "  go:vet             Run go vet"
+        echo ""
+        echo "Testing:"
+        echo "  test:go            Run Go tests only"
+        echo "  test:shell         Run shell script tests only"
+        echo "  test:coverage      Run tests with coverage"
+        echo "  test:fast          Run fast tests only"
+        echo ""
+        echo "Quality:"
+        echo "  go:lint            Lint Go code"
+        echo "  shell:lint         Lint shell scripts"
+        echo "  test:lint          Run all linters"
+        echo ""
+        echo "For full list: task --list"

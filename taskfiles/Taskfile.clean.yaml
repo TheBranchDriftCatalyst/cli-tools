@@ -1,0 +1,19 @@
+version: 3
+
+tasks:
+  caches:
+    desc: Clean Task cache directory
+    cmds:
+      - rm -rf .task
+
+  test:
+    desc: Clean test artifacts
+    cmds:
+      - rm -f coverage.out coverage.html
+      - rm -rf tests/coverage.out tests/coverage.html
+
+  all:
+    desc: Clean all build artifacts and test outputs
+    deps: [caches, test]
+    cmds:
+      - echo "All artifacts cleaned"

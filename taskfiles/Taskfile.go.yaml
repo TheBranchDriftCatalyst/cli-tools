@@ -1,0 +1,52 @@
+version: 3
+
+vars:
+  CMD_SRC:
+    sh: realpath ./src/go/cmd
+  LOCAL_BIN:
+    sh: realpath ./bin
+
+tasks:
+  build:
+    desc: Build Go CLI commands
+    silent: false
+    sources:
+      - "{{ .CMD_SRC }}/**/main.go"
+    generates:
+      - "{{ .LOCAL_BIN }}/*"
+    cmds:
+      - for: sources
+        cmd: |
+          PROJECT_DIR=$(dirname {{ .ITEM }})
+          PROJECT_NAME=$(basename $PROJECT_DIR)
+          if [ -f "$PROJECT_DIR/go.mod" ]; then
+            echo "Building $PROJECT_NAME with separate go.mod"
+            cd $PROJECT_DIR && go build -o {{ .LOCAL_BIN }}/$PROJECT_NAME .
+          else
+            go build -o {{ .LOCAL_BIN }}/$PROJECT_NAME {{ .ITEM }}
+          fi
+
+  fmt:
+    desc: Format Go code
+    cmds:
+      - go fmt ./src/go/...
+      - cd src/go/cmd/wipctl && go fmt ./...
+
+  vet:
+    desc: Run go vet on Go code
+    cmds:
+      - go vet ./src/go/...
+      - cd src/go/cmd/wipctl && go vet ./...
+
+  lint:
+    desc: Lint Go code
+    cmds:
+      - |
+        if command -v golangci-lint >/dev/null 2>&1; then
+          golangci-lint run ./src/go/...
+          cd src/go/cmd/wipctl && golangci-lint run ./...
+        else
+          echo "golangci-lint not installed. Install with: brew install golangci-lint"
+          go vet ./src/go/...
+          cd src/go/cmd/wipctl && go vet ./...
+        fi

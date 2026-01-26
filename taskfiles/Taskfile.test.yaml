@@ -1,0 +1,58 @@
+version: 3
+
+vars:
+  TEST_RUNNER: ./tests/run-tests.sh
+
+tasks:
+  all:
+    desc: Run all tests
+    deps: [build]
+    cmds:
+      - "{{ .TEST_RUNNER }} all"
+
+  go:
+    desc: Run Go tests only
+    deps: [build]
+    cmds:
+      - "{{ .TEST_RUNNER }} go"
+
+  shell:
+    desc: Run shell script tests only
+    deps: [build]
+    cmds:
+      - "{{ .TEST_RUNNER }} shell"
+
+  bats:
+    desc: Run BATS tests only
+    deps: [build]
+    cmds:
+      - "{{ .TEST_RUNNER }} bats"
+
+  integration:
+    desc: Run integration tests only
+    deps: [build]
+    cmds:
+      - "{{ .TEST_RUNNER }} integration"
+
+  coverage:
+    desc: Run Go tests with coverage
+    deps: [build]
+    cmds:
+      - "{{ .TEST_RUNNER }} -c go"
+
+  fast:
+    desc: Run fast tests (skip slow integration tests)
+    deps: [build]
+    cmds:
+      - "{{ .TEST_RUNNER }} -f all"
+
+  verbose:
+    desc: Run tests with verbose output
+    deps: [build]
+    cmds:
+      - "{{ .TEST_RUNNER }} -v all"
+
+  lint:
+    desc: Run all linters
+    cmds:
+      - "{{ .TEST_RUNNER }} -l all"
