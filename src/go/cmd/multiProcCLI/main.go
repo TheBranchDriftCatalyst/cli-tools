@@ -183,16 +183,28 @@ func setupProcesses(commands []string) []*Process {
 func runProcess(p *Process, index int) {
 	stdout, err := p.Cmd.StdoutPipe()
 	if err != nil {
-		p.LogChan <- fmt.Sprintf("Error creating stdout pipe: %v", err)
+		// Try to send to channel, ignore if closed
+		select {
+		case p.LogChan <- fmt.Sprintf("Error creating stdout pipe: %v", err):
+		default:
+		}
+		p.Mutex.Lock()
 		p.Status = "Error"
+		p.Mutex.Unlock()
 		updateUI(index)
 		return
 	}
 
 	stderr, err := p.Cmd.StderrPipe()
 	if err != nil {
-		p.LogChan <- fmt.Sprintf("Error creating stderr pipe: %v", err)
+		// Try to send to channel, ignore if closed
+		select {
+		case p.LogChan <- fmt.Sprintf("Error creating stderr pipe: %v", err):
+		default:
+		}
+		p.Mutex.Lock()
 		p.Status = "Error"
+		p.Mutex.Unlock()
 		updateUI(index)
 		return
 	}
@@ -201,8 +213,14 @@ func runProcess(p *Process, index int) {
 	go captureOutput(stderr, p.ErrChan, p)
 
 	if err := p.Cmd.Start(); err != nil {
-		p.LogChan <- fmt.Sprintf("Error starting process: %v", err)
+		// Try to send to channel, ignore if closed
+		select {
+		case p.LogChan <- fmt.Sprintf("Error starting process: %v", err):
+		default:
+		}
+		p.Mutex.Lock()
 		p.Status = "Error"
+		p.Mutex.Unlock()
 		appendLog(p, err.Error(), true)
 		updateUI(index)
 		return
@@ -217,21 +235,41 @@ func runProcess(p *Process, index int) {
 		}
 	}()
 
+	p.Mutex.Lock()
 	p.Status = "Running"
+	p.Mutex.Unlock()
 	updateUI(index)
 	if err := p.Cmd.Wait(); err != nil {
 		// p.LogChan <- fmt.Sprintf("Process ended with error: %v", err)
+		p.Mutex.Lock()
 		p.Status = "Error"
+		p.Mutex.Unlock()
 	}
 	updateUI(index)
 }
 
 func captureOutput(pipe io.ReadCloser, channel chan<- string, proc *Process) {
+	defer func() {
+		if r := recover(); r != nil {
+			// Channel might already be closed, ignore panic
+		}
+	}()
+	defer close(channel)
+
 	scanner := bufio.NewScanner(pipe)
-	for scanner.Scan() && proc.Running { // Check if still running
-		channel <- scanner.Text()
+	for scanner.Scan() { // Check if still running
+		proc.Mutex.Lock()
+		running := proc.Running
+		proc.Mutex.Unlock()
+		if !running {
+			break
+		}
+		select {
+		case channel <- scanner.Text():
+		default:
+			// Channel might be closed, ignore
+		}
 	}
-	close(channel)
 }
 
 func appendLog(p *Process, log string, isError bool) {
@@ -273,13 +311,24 @@ func updateUI(index int) {
 	globalMutex.Lock()
 	defer globalMutex.Unlock()
 
-	p := processes[index]
-	if p.Cmd.Process != nil {
-		tabPane.TabNames[index] = fmt.Sprintf("%s (%d) %s", p.Name, p.Cmd.Process.Pid, p.Status)
-	} else {
-		tabPane.TabNames[index] = fmt.Sprintf("%s (?) %s", p.Name, p.Status)
+	// Bounds checking to prevent panics during tests
+	if index < 0 || index >= len(processes) || tabPane == nil || index >= len(tabPane.TabNames) {
+		return
 	}
-	if index == tabPane.ActiveTabIndex {
+
+	p := processes[index]
+
+	// Get status with proper locking
+	p.Mutex.Lock()
+	status := p.Status
+	p.Mutex.Unlock()
+
+	if p.Cmd.Process != nil {
+		tabPane.TabNames[index] = fmt.Sprintf("%s (%d) %s", p.Name, p.Cmd.Process.Pid, status)
+	} else {
+		tabPane.TabNames[index] = fmt.Sprintf("%s (?) %s", p.Name, status)
+	}
+	if index == tabPane.ActiveTabIndex && logDisplay != nil {
 		logDisplay.Rows = p.LogText.Rows
 		scrollToLatest(p)
 	}
