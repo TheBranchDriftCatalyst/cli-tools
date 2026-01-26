@@ -1,0 +1,485 @@
+#!/usr/bin/env zsh
+# kexec — pick a running Kubernetes pod (with preview) and drop into its shell.
+# Usage: kexec [options] [-- CMD ...]
+# Dependencies: kubectl, fzf
+# Shell: Zsh (POSIX-ish but uses zshisms intentionally)
+
+emulate -L zsh
+set -o pipefail
+autoload -Uz colors && colors
+
+# ─── Constants ─────────────────────────────────────────────────────────────────
+typeset -r SCRIPT_NAME="${0##*/}"
+typeset -r VERSION="1.0.0"
+typeset -ra REQUIRED_CMDS=(kubectl fzf)
+# Try shells in this order inside the container
+typeset -ra SHELL_PREFS=(zsh fish bash ash dash sh)
+# Config file locations
+typeset -ra CONFIG_PATHS=(
+  "${XDG_CONFIG_HOME:-$HOME/.config}/kexec/config"
+  "$HOME/.kexec.conf"
+)
+
+# UI glyphs (ASCII-safe fallbacks if TERM is dumb)
+if [[ -t 1 && $TERM != dumb && $TERM != linux ]]; then
+  # Nerd Font icons
+  NEON_INFO="%F{cyan}󰣇%f"
+  NEON_ERR="%F{red}%f"
+  NEON_OK="%F{green}%f"
+  NEON_WARN="%F{yellow}⚠%f"
+  ICON_POD="󱃾"
+  ICON_CONTAINER="󰡨"
+  ICON_SHELL="󰞷"
+  ICON_USER="󰀉"
+  ICON_STATUS="󰓅"
+  ICON_CPU="󰍛"
+  ICON_MEM="󰑭"
+  ICON_NET="󰈀"
+  BOX_TL="┏"; BOX_TR="┓"; BOX_BL="┗"; BOX_BR="┛"; BOX_H="━"; BOX_V="┃"
+else
+  NEON_INFO="[INFO]"
+  NEON_ERR="[ERROR]"
+  NEON_OK="[OK]"
+  NEON_WARN="[WARN]"
+  ICON_POD="[P]"
+  ICON_CONTAINER="[C]"
+  ICON_SHELL="[S]"
+  ICON_USER="[U]"
+  ICON_STATUS="[S]"
+  ICON_CPU="[CPU]"
+  ICON_MEM="[MEM]"
+  ICON_NET="[NET]"
+  BOX_TL="+"; BOX_TR="+"; BOX_BL="+"; BOX_BR="+"; BOX_H="-"; BOX_V="|"
+fi
+
+# ─── Configuration ────────────────────────────────────────────────────────────
+typeset -A CONFIG
+CONFIG=(
+  [default_namespace]="teak-dev"
+  [default_shell]=""
+  [default_container]=""
+  [show_stats]="true"
+  [preview_logs]="20"
+  [favorite_pods]=""
+  [fzf_height]="60%"
+)
+
+load_config() {
+  local config_file
+  for config_file in $CONFIG_PATHS; do
+    if [[ -r "$config_file" ]]; then
+      source "$config_file" 2>/dev/null || true
+      break
+    fi
+  done
+}
+
+# ─── Logging ───────────────────────────────────────────────────────────────────
+log_info()  { (( quiet )) || print -P "${NEON_INFO} %F{cyan}$*%f"; }
+log_error() { print -P "${NEON_ERR} %F{red}$*%f" >&2; }
+log_ok()    { (( quiet )) || print -P "${NEON_OK} %F{green}$*%f"; }
+log_warn()  { (( quiet )) || print -P "${NEON_WARN} %F{yellow}$*%f"; }
+
+banner() {
+  local title="$1"
+  local line="$(printf '%0.s'"$BOX_H" {1..70})"
+  print -P "%F{magenta}${BOX_TL}${line}${BOX_TR}%f"
+  print -P "%F{magenta}${BOX_V}%f %F{magenta}${title}%f %F{blue}v${VERSION}%f"
+  print -P "%F{magenta}${BOX_BL}${line}${BOX_BR}%f"
+}
+
+# ─── Usage ─────────────────────────────────────────────────────────────────────
+usage() {
+  cat <<'EOF'
+kexec — fuzzy-pick a running Kubernetes pod with live preview, then exec into the best available shell.
+
+Usage:
+  kexec [options] [-- CMD ...]
+
+Options:
+  -p, --pod NAME          Non-interactive: target this pod by name
+  -c, --container NAME    Target specific container in pod (auto-detect if not specified)
+  -n, --namespace NS      Kubernetes namespace (default: teak-dev)
+  -s, --shell SHELL       Force shell inside container (zsh|fish|bash|ash|dash|sh)
+  -f, --filter PATTERN    Filter pods by name pattern
+      --all-namespaces    Show pods from all namespaces
+      --favorites         Show only favorite pods from config
+  -q, --quiet             Quieter logging
+  -v, --verbose           Verbose output
+      --stats             Force show pod stats in preview
+      --no-stats          Force hide pod stats in preview
+  -h, --help              Show help and exit
+      --version           Show version
+      --emit-completion   Print zsh completion to stdout
+      --config            Show config file locations
+
+Examples:
+  kexec                                    # Interactive pod selection
+  kexec -p protecht-platform-xxx           # Direct pod access
+  kexec -p protecht-platform-xxx -c app    # Specific container
+  kexec -p protecht-platform-xxx -- ls -al # Run specific command
+  kexec -s fish -n teak-dev                # Force fish shell
+  kexec -f "platform|claim"                # Filter by pattern
+  kexec --all-namespaces                   # Show all namespaces
+
+Config file locations (first found is used):
+  ${XDG_CONFIG_HOME:-$HOME/.config}/kexec/config
+  $HOME/.kexec.conf
+
+Sample config file:
+  CONFIG[default_namespace]="teak-dev"
+  CONFIG[default_shell]="fish"
+  CONFIG[default_container]="app"
+  CONFIG[show_stats]="false"
+  CONFIG[preview_logs]="30"
+  CONFIG[favorite_pods]="protecht-platform api-claim"
+  CONFIG[fzf_height]="70%"
+EOF
+  exit 0
+}
+
+# ─── Enhanced Completions ──────────────────────────────────────────────────────
+emit_completion() {
+  cat <<'ZSHCOMP'
+#compdef kexec
+# Enhanced zsh completion for kexec v1.0
+local -a _kexec_opts _kexec_shells _kexec_pods
+_kexec_opts=(
+  '(-p --pod)'{-p,--pod}'[pod name]:pod:->pods'
+  '(-c --container)'{-c,--container}'[container name]:container:'
+  '(-n --namespace)'{-n,--namespace}'[namespace]:namespace:(teak-dev default kube-system)'
+  '(-s --shell)'{-s,--shell}'[force shell]:shell:(zsh fish bash ash dash sh)'
+  '(-f --filter)'{-f,--filter}'[filter pattern]:pattern:'
+  '--all-namespaces[show pods from all namespaces]'
+  '--favorites[show only favorite pods]'
+  '--stats[force show stats]'
+  '--no-stats[force hide stats]'
+  '(-q --quiet)'{-q,--quiet}'[quieter logs]'
+  '(-v --verbose)'{-v,--verbose}'[verbose output]'
+  '(-h --help)'{-h,--help}'[show help]'
+  '--version[show version]'
+  '--config[show config locations]'
+  '--emit-completion[print completion function]'
+)
+
+case $state in
+  (pods)
+    _kexec_pods=(${(f)"$(kubectl get pods -n teak-dev --no-headers 2>/dev/null | awk '{print $1":"$3}')"})
+    _describe -t pods 'pods' _kexec_pods
+    return
+  ;;
+esac
+
+_arguments -s -S $_kexec_opts '*::command:->cmds'
+
+case $state in
+  (cmds)
+    _normal
+  ;;
+esac
+ZSHCOMP
+}
+
+# ─── Dependency check ──────────────────────────────────────────────────────────
+for cmd in $REQUIRED_CMDS; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    log_error "Required command not found: $cmd"
+    log_info "Install with: brew install $cmd  # or your package manager"
+    exit 2
+  fi
+done
+
+# Load configuration
+load_config
+
+# ─── Defaults / Flags ──────────────────────────────────────────────────────────
+typeset pod=""
+typeset container="${CONFIG[default_container]}"
+typeset namespace="${CONFIG[default_namespace]}"
+typeset forced_shell="${CONFIG[default_shell]}"
+typeset quiet=0
+typeset verbose=0
+typeset all_namespaces=0
+typeset show_favorites=0
+typeset filter_pattern=""
+typeset force_stats=""
+
+# ─── Parse args ────────────────────────────────────────────────────────────────
+typeset -a passthru
+while (( $# )); do
+  case "$1" in
+    -p|--pod)           shift; pod="$1" ;;
+    -c|--container)     shift; container="$1" ;;
+    -n|--namespace)     shift; namespace="$1" ;;
+    -s|--shell)         shift; forced_shell="$1" ;;
+    -f|--filter)        shift; filter_pattern="$1" ;;
+    --all-namespaces)   all_namespaces=1; namespace="" ;;
+    --favorites)        show_favorites=1 ;;
+    --stats)            force_stats="true" ;;
+    --no-stats)         force_stats="false" ;;
+    -q|--quiet)         quiet=1 ;;
+    -v|--verbose)       verbose=1 ;;
+    -h|--help)          usage ;;
+    --version)          echo "$SCRIPT_NAME v$VERSION"; exit 0 ;;
+    --config)
+      echo "Config file locations:"
+      for path in $CONFIG_PATHS; do
+        if [[ -r "$path" ]]; then
+          echo "  ✓ $path (active)"
+        else
+          echo "  ✗ $path"
+        fi
+      done
+      exit 0 ;;
+    --emit-completion) emit_completion; exit 0 ;;
+    --) shift; passthru=("$@"); break ;;
+    -*) log_error "Unknown option: $1"; usage ;;
+    *)
+      if [[ -z "$pod" ]]; then
+        pod="$1"
+      else
+        log_error "Unexpected argument: $1"
+        usage
+      fi ;;
+  esac
+  shift
+done
+
+# Override config with force flags
+[[ -n "$force_stats" ]] && CONFIG[show_stats]="$force_stats"
+
+# ─── Enhanced Pod Selection ───────────────────────────────────────────────────
+build_pod_query() {
+  local query="kubectl get pods"
+
+  if (( all_namespaces )); then
+    query+=" --all-namespaces"
+  elif [[ -n "$namespace" ]]; then
+    query+=" -n $namespace"
+  fi
+
+  query+=' -o custom-columns="NAMESPACE:.metadata.namespace,NAME:.metadata.name,READY:.status.containerStatuses[*].ready,STATUS:.status.phase,RESTARTS:.status.containerStatuses[*].restartCount,AGE:.metadata.creationTimestamp,IP:.status.podIP" --no-headers'
+
+  if [[ -n "$filter_pattern" ]]; then
+    query+=" | grep -iE '$filter_pattern'"
+  fi
+
+  if (( show_favorites )) && [[ -n "${CONFIG[favorite_pods]}" ]]; then
+    local favorites_pattern="$(echo "${CONFIG[favorite_pods]}" | tr ' ' '|')"
+    query+=" | grep -E '($favorites_pattern)'"
+  fi
+
+  echo "$query"
+}
+
+select_pod() {
+  local pod_data
+  pod_data="$(eval "$(build_pod_query)")"
+
+  if [[ -z "$pod_data" ]]; then
+    log_error "No pods found matching criteria"
+    return 1
+  fi
+
+  echo "$pod_data" | fzf \
+    --height="${CONFIG[fzf_height]}" \
+    --reverse --border --ansi \
+    --prompt="  ${ICON_POD} Select pod > " \
+    --with-nth=2 \
+    --header="TAB: multi-select, CTRL-R: reload" \
+    --bind="ctrl-r:reload($(build_pod_query))" \
+    --preview='
+      ns=$(echo {} | awk "{print \$1}")
+      pod=$(echo {} | awk "{print \$2}")
+      pod_status=$(echo {} | awk "{print \$4}")
+      ip=$(echo {} | awk "{print \$7}")
+
+      echo "╭─ Pod Details ───────────────────────────────────────────────"
+      echo "│ '"${ICON_POD}"' Pod:       $pod"
+      echo "│   Namespace: $ns"
+      echo "│   Status:    $pod_status"
+      echo "│   '"${ICON_NET}"' IP:        $ip"
+
+      # Get containers
+      echo "│"
+      echo "│ ── Containers ───────────────────────────────────────────────"
+      kubectl get pod $pod -n $ns -o jsonpath="{range .spec.containers[*]}{.name}{\"\\t\"}{.image}{\"\\n\"}{end}" 2>/dev/null | sed "s/^/│   '"${ICON_CONTAINER}"' /"
+
+      # Get conditions
+      echo "│"
+      echo "│ ── Conditions ───────────────────────────────────────────────"
+      kubectl get pod $pod -n $ns -o jsonpath="{range .status.conditions[*]}{.type}={.status}{\"\\n\"}{end}" 2>/dev/null | sed "s/^/│   /"
+
+      # Show resource usage if metrics-server is available
+      if [[ "'${CONFIG[show_stats]}'" == "true" ]]; then
+        metrics=$(kubectl top pod $pod -n $ns --no-headers 2>/dev/null)
+        if [[ -n "$metrics" ]]; then
+          cpu=$(echo "$metrics" | awk "{print \$2}")
+          mem=$(echo "$metrics" | awk "{print \$3}")
+          echo "│"
+          echo "│ ── Resource Usage ───────────────────────────────────────────"
+          echo "│ '"${ICON_CPU}"' CPU:       $cpu"
+          echo "│ '"${ICON_MEM}"' Memory:    $mem"
+        fi
+      fi
+
+      # Show environment variables from first container
+      echo "│"
+      echo "│ ── Environment (first container) ────────────────────────────"
+      kubectl get pod $pod -n $ns -o jsonpath="{.spec.containers[0].env[*].name}" 2>/dev/null | tr " " "\n" | head -5 | sed "s/^/│   /"
+
+      # Show volume mounts
+      echo "│"
+      echo "│ ── Volume Mounts ────────────────────────────────────────────"
+      kubectl get pod $pod -n $ns -o jsonpath="{range .spec.containers[0].volumeMounts[*]}{.name}:{.mountPath}{\"\\n\"}{end}" 2>/dev/null | head -3 | sed "s/^/│   /"
+
+      echo "│"
+      echo "│ ── Recent Logs ('"${CONFIG[preview_logs]}"' lines) ─────────────────────────────"
+      kubectl logs --tail '"${CONFIG[preview_logs]}"' $pod -n $ns 2>&1 | sed "s/^/│   /"
+      echo "╰─────────────────────────────────────────────────────────────"
+    ' \
+    --preview-window=right:70%:wrap \
+  | awk '{print $1":"$2}'
+}
+
+# ─── Main Selection Logic ─────────────────────────────────────────────────────
+if [[ -z "$pod" ]]; then
+  banner "kexec // kubernetes shell injector"
+
+  if (( verbose )); then
+    log_info "Config loaded from: $(for path in $CONFIG_PATHS; do [[ -r "$path" ]] && echo "$path" && break; done)"
+    log_info "Filters: all_ns=$all_namespaces favorites=$show_favorites pattern='$filter_pattern'"
+  fi
+
+  selected="$(select_pod)"
+  if [[ -z "$selected" ]]; then
+    log_error "No pod selected."
+    exit 1
+  fi
+
+  # Parse namespace:pod format
+  namespace="${selected%%:*}"
+  pod="${selected##*:}"
+fi
+
+# Validate pod exists
+if ! kubectl get pod "$pod" -n "$namespace" >/dev/null 2>&1; then
+  log_error "Pod not found: $pod in namespace $namespace"
+  exit 1
+fi
+
+# Get pod status
+pod_status="$(kubectl get pod "$pod" -n "$namespace" -o jsonpath='{.status.phase}' 2>/dev/null)"
+if [[ "$pod_status" != "Running" ]]; then
+  log_warn "Pod $pod is not running (status: $pod_status)"
+  exit 1
+fi
+
+# ─── Container Selection ──────────────────────────────────────────────────────
+if [[ -z "$container" ]]; then
+  # Get list of containers in pod
+  containers=($(kubectl get pod "$pod" -n "$namespace" -o jsonpath='{.spec.containers[*].name}'))
+
+  if (( ${#containers[@]} == 0 )); then
+    log_error "No containers found in pod $pod"
+    exit 1
+  elif (( ${#containers[@]} == 1 )); then
+    container="${containers[1]}"
+    (( verbose )) && log_info "Auto-selected container: $container"
+  else
+    # Multiple containers - let user pick
+    log_info "Multiple containers found, select one:"
+    container=$(printf '%s\n' "${containers[@]}" | fzf \
+      --height=40% \
+      --reverse --border \
+      --prompt="  ${ICON_CONTAINER} Select container > ")
+
+    if [[ -z "$container" ]]; then
+      log_error "No container selected"
+      exit 1
+    fi
+  fi
+fi
+
+# ─── Enhanced Shell Detection ─────────────────────────────────────────────────
+pick_shell() {
+  local p="$1"
+  local c="$2"
+  local ns="$3"
+
+  if [[ -n "$forced_shell" ]]; then
+    if kubectl exec "$p" -n "$ns" -c "$c" -- sh -c "command -v $forced_shell" >/dev/null 2>&1; then
+      print -r -- "$forced_shell"
+      return 0
+    else
+      log_error "Forced shell '$forced_shell' not found in container."
+      return 1
+    fi
+  fi
+
+  # Try preferred shells
+  local sh
+  for sh in $SHELL_PREFS; do
+    if kubectl exec "$p" -n "$ns" -c "$c" -- sh -c "command -v $sh" >/dev/null 2>&1; then
+      (( verbose )) && log_info "Found shell: $sh"
+      print -r -- "$sh"
+      return 0
+    fi
+  done
+
+  # Fallback checks
+  for fallback in /bin/sh /usr/bin/sh sh; do
+    if kubectl exec "$p" -n "$ns" -c "$c" -- sh -c "test -x $fallback" >/dev/null 2>&1; then
+      log_warn "Using fallback shell: $fallback"
+      print -r -- "$fallback"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+shell_found="$(pick_shell "$pod" "$container" "$namespace")" || {
+  log_error "No usable shell found in $pod/$container."
+  log_info "Try: kubectl exec $pod -n $namespace -c $container -- ls /bin/*sh"
+  exit 1
+}
+
+# ─── Build Kubectl Exec Command ──────────────────────────────────────────────
+typeset -a exec_cmd
+exec_cmd=(kubectl exec -it "$pod" -n "$namespace" -c "$container")
+
+# Command handling
+if (( ${#passthru} )); then
+  # Build command string safely
+  exec_cmd+=(-- "$shell_found" -l -c "${passthru[*]}")
+else
+  # Interactive shell
+  exec_cmd+=(-- "$shell_found" -l)
+fi
+
+# ─── Enhanced Execution with Better Feedback ──────────────────────────────────
+if (( verbose )) || ! (( quiet )); then
+  log_info "${ICON_POD} %F{magenta}$pod%f  ${ICON_CONTAINER} %F{cyan}$container%f  ${ICON_SHELL} %F{yellow}$shell_found%f"
+
+  if (( verbose )); then
+    log_info "Namespace: $namespace"
+    log_info "Full command: ${exec_cmd[*]}"
+  fi
+fi
+
+# Execute with proper signal handling
+trap 'log_warn "Interrupted"; exit 130' INT TERM
+
+"${exec_cmd[@]}"
+exit_status=$?
+
+if (( exit_status == 0 )); then
+  log_ok "Session ended cleanly."
+elif (( exit_status == 130 )); then
+  log_warn "Session interrupted."
+else
+  log_error "kubectl exec exited with status $exit_status"
+fi
+
+exit $exit_status

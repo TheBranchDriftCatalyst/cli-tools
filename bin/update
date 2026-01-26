@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+
+set -o pipefail
+
+# =============================================================================
+# Catalyst System Update Script
+# =============================================================================
+
+# Acquire sudo upfront and keep it alive for the entire session
+acquire_sudo() {
+  echo -e "\033[38;5;141m\033[1m🔐 Requesting administrator privileges...\033[0m"
+  sudo -v || { echo "sudo required"; exit 1; }
+
+  # Keep-alive: update sudo timestamp every 30s until script exits
+  while true; do sudo -n true; sleep 30; kill -0 "$$" || exit; done 2>/dev/null &
+  SUDO_KEEPALIVE_PID=$!
+
+  # Clean exit on Ctrl+C or script end
+  trap 'echo -e "\n\033[38;5;204m✗ Interrupted\033[0m"; kill $SUDO_KEEPALIVE_PID 2>/dev/null; exit 130' INT TERM
+  trap 'kill $SUDO_KEEPALIVE_PID 2>/dev/null' EXIT
+}
+
+# Refresh sudo and run command - ensures timestamp is fresh before each privileged operation
+sudo_run() {
+  sudo -v 2>/dev/null  # refresh timestamp
+  sudo "$@"
+}
+
+# Theme Colors
+readonly COLOR_PRIMARY="\033[38;5;141m"   # Purple
+readonly COLOR_SUCCESS="\033[38;5;120m"   # Green
+readonly COLOR_ERROR="\033[38;5;204m"     # Pink/Red
+readonly COLOR_WARNING="\033[38;5;222m"   # Yellow
+readonly COLOR_INFO="\033[38;5;117m"      # Blue
+readonly COLOR_RESET="\033[0m"
+readonly BOLD="\033[1m"
+
+# State
+readonly LOG_FILE="/tmp/catalyst-update-$(date +%Y%m%d_%H%M%S).log"
+declare -a RESULTS=()
+declare -a DETAILED_LOG=()
+
+# =============================================================================
+# Core Logging
+# =============================================================================
+
+log() {
+  echo -e "$1" | tee -a "$LOG_FILE"
+}
+
+# Generic result logger - DRY helper for success/error/warning
+_log_result() {
+  local color="$1" symbol="$2" message="$3" detail_prefix="$4"
+  local formatted="${color}${symbol} ${message}${COLOR_RESET}"
+  log "$formatted"
+  RESULTS+=("${symbol} ${message}")
+  DETAILED_LOG+=("${detail_prefix}${symbol} ${message}")
+}
+
+header() {
+  local border="${COLOR_PRIMARY}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${COLOR_RESET}"
+  log "\n${border}"
+  log "${COLOR_PRIMARY}${BOLD}  $1${COLOR_RESET}"
+  log "${border}\n"
+  DETAILED_LOG+=("$1")
+}
+
+step()    { log "${COLOR_INFO}▶ $1${COLOR_RESET}"; DETAILED_LOG+=("  ▶ $1"); }
+success() { _log_result "$COLOR_SUCCESS" "✓" "$1" "    "; }
+error()   { _log_result "$COLOR_ERROR"   "✗" "$1" "    "; }
+warning() { _log_result "$COLOR_WARNING" "⚠" "$1" "    "; }
+
+# =============================================================================
+# Command Execution Helpers
+# =============================================================================
+
+# Check if a command exists
+has_cmd() {
+  command -v "$1" &>/dev/null
+}
+
+# Run a command with logging and status reporting
+# Usage: run_cmd "description" "success_msg" "fail_msg" "fail_level" command args...
+# fail_level: "error" or "warning"
+run_cmd() {
+  local desc="$1" success_msg="$2" fail_msg="$3" fail_level="$4"
+  shift 4
+
+  step "$desc"
+  if "$@" &>>"$LOG_FILE"; then
+    success "$success_msg"
+    return 0
+  else
+    if [[ "$fail_level" == "error" ]]; then
+      error "$fail_msg"
+    else
+      warning "$fail_msg"
+    fi
+    return 1
+  fi
+}
+
+# Run a command only if prerequisite command exists
+# Usage: run_if_has "prereq_cmd" "description" "success" "fail" "level" command args...
+run_if_has() {
+  local prereq="$1"
+  shift
+
+  if ! has_cmd "$prereq"; then
+    warning "${prereq} not installed, skipping"
+    return 1
+  fi
+  run_cmd "$@"
+}
+
+# =============================================================================
+# Cleanup Functions
+# =============================================================================
+
+run_cleanup() {
+  header "🧹 Pre-Update Cleanup"
+
+  if has_cmd brew; then
+    run_cmd "Running Homebrew cleanup..." \
+            "Homebrew cleaned" \
+            "Homebrew cleanup had issues (non-critical)" \
+            "warning" \
+            brew cleanup
+
+    run_cmd "Running Homebrew doctor..." \
+            "Homebrew doctor passed" \
+            "Homebrew doctor found issues (non-critical)" \
+            "warning" \
+            brew doctor
+  fi
+
+  run_if_has gem \
+    "Cleaning Ruby gems..." \
+    "Ruby gems cleaned" \
+    "Ruby gem cleanup had issues (non-critical)" \
+    "warning" \
+    gem cleanup
+
+  run_if_has npm \
+    "Cleaning npm cache..." \
+    "npm cache cleaned" \
+    "npm cache cleanup had issues (non-critical)" \
+    "warning" \
+    npm cache clean --force
+}
+
+post_cleanup() {
+  header "🧹 Post-Update Cleanup"
+
+  run_if_has brew \
+    "Final Homebrew cleanup..." \
+    "Homebrew cleaned" \
+    "Cleanup had issues" \
+    "warning" \
+    brew cleanup
+
+  run_if_has gem \
+    "Final gem cleanup..." \
+    "Gems cleaned" \
+    "Cleanup had issues" \
+    "warning" \
+    gem cleanup
+}
+
+# =============================================================================
+# Update Functions
+# =============================================================================
+
+update_xcode() {
+  step "Checking Xcode Command Line Tools..."
+  if xcode-select -p &>/dev/null; then
+    success "Xcode Command Line Tools installed"
+  else
+    step "Installing Xcode Command Line Tools..."
+    sudo_run xcode-select --install 2>>"$LOG_FILE" || \
+      warning "Xcode tools install triggered (may require user interaction)"
+  fi
+}
+
+update_macos() {
+  run_cmd "Updating macOS..." \
+          "macOS updated" \
+          "macOS update incomplete or not needed" \
+          "warning" \
+          sudo_run softwareupdate -i -a
+}
+
+update_homebrew() {
+  if ! has_cmd brew; then
+    warning "Homebrew not installed, skipping"
+    return
+  fi
+
+  run_cmd "Updating Homebrew..." \
+          "Homebrew updated" \
+          "Homebrew update failed" \
+          "error" \
+          brew update || return
+
+  run_cmd "Upgrading Homebrew packages..." \
+          "Homebrew packages upgraded" \
+          "Homebrew package upgrade failed" \
+          "error" \
+          brew upgrade
+}
+
+update_node() {
+  if ! has_cmd node; then
+    warning "Node.js not installed, skipping npm updates"
+    return
+  fi
+
+  step "Node.js version: $(node -v | sed 's/v//')"
+
+  run_if_has npm \
+    "Updating npm packages globally..." \
+    "Global npm packages updated" \
+    "npm global update had issues (possibly version incompatibility)" \
+    "warning" \
+    npm update -g
+}
+
+update_ruby() {
+  if ! has_cmd ruby; then
+    warning "Ruby not installed, skipping gem updates"
+    return
+  fi
+
+  step "Ruby version: $(ruby -v | awk '{print $2}')"
+
+  if ! has_cmd gem; then
+    warning "RubyGems not available, skipping"
+    return
+  fi
+
+  run_cmd "Updating RubyGems system..." \
+          "RubyGems system updated" \
+          "RubyGems system update failed (possibly version incompatibility)" \
+          "warning" \
+          sudo_run gem update --system
+
+  run_cmd "Updating installed gems..." \
+          "Ruby gems updated" \
+          "Some gem updates failed" \
+          "warning" \
+          gem update
+}
+
+# =============================================================================
+# Summary
+# =============================================================================
+
+show_summary() {
+  header "📊 Update Summary"
+
+  log "${COLOR_INFO}${BOLD}Quick Results:${COLOR_RESET}"
+  for result in "${RESULTS[@]}"; do
+    log "  $result"
+  done
+
+  log "\n${COLOR_INFO}${BOLD}Detailed Report:${COLOR_RESET}"
+  for detail in "${DETAILED_LOG[@]}"; do
+    echo -e "$detail" | tee -a "$LOG_FILE"
+  done
+
+  log "\n${COLOR_INFO}📝 Full log: ${LOG_FILE}${COLOR_RESET}\n"
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+
+main() {
+  acquire_sudo
+
+  header "🚀 Catalyst System Update"
+
+  run_cleanup
+
+  header "📦 System Updates"
+  update_xcode
+  update_macos
+
+  header "🍺 Homebrew Updates"
+  update_homebrew
+
+  header "📦 Package Manager Updates"
+  update_node
+  update_ruby
+
+  post_cleanup
+  show_summary
+
+  log "${COLOR_SUCCESS}${BOLD}✅ Update process complete!${COLOR_RESET}\n"
+}
+
+main "$@"

@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# wtf - compact, modular system triage script with Linux/macOS fallbacks
+# preserves original behavior but organizes code into functions.
+
+set -u
+
+# Basic helpers
+hdr() { echo -e "\n=== $* ==="; }
+
+# Detect OS
+OS=$(uname -s)
+
+cpu_hogs() {
+  hdr "CPU HOGS (top 15)"
+  if [[ "$OS" == "Darwin" ]]; then
+    printf "%-8s %-10s %-6s %-6s %s\n" PID USER PPID CPU CMD
+    ps -Ao pid,user,ppid,command,%cpu,%mem | sed 1d | sort -k5,5nr | head -n 15
+  else
+    ps -eo pid,user,ppid,cmd,%cpu,%mem --sort=-%cpu | head -n 15
+  fi
+}
+
+mem_hogs() {
+  hdr "MEMORY HOGS (top 15)"
+  if [[ "$OS" == "Darwin" ]]; then
+    printf "%-8s %-10s %-6s %-6s %s\n" PID USER PPID MEM CMD
+    ps -Ao pid,user,ppid,command,%cpu,%mem | sed 1d | sort -k6,6nr | head -n 15
+  else
+    ps -eo pid,user,ppid,cmd,%mem,%cpu --sort=-%mem | head -n 15
+  fi
+}
+
+disk_usage() {
+  hdr "DISK USAGE"
+  if [[ "$OS" == "Darwin" ]]; then
+    df -h | grep -vE 'devfs|map auto_home'
+  else
+    df -hT | grep -vE 'tmpfs|overlay'
+  fi
+}
+
+inode_usage() {
+  hdr "INODE USAGE"
+  if [[ "$OS" == "Darwin" ]]; then
+    df -i | grep -vE 'devfs|map auto_home'
+  else
+    df -i | grep -vE 'tmpfs|overlay'
+  fi
+}
+
+io_hogs() {
+  hdr "I/O HOGS (5s sample)"
+  if command -v iotop >/dev/null 2>&1; then
+    iotop -b -n 5 -o 2>/dev/null | head -n 25 || echo "iotop needs root (CAP_SYS_ADMIN)."
+  elif command -v pidstat >/dev/null 2>&1; then
+    echo "(pidstat fallback, 1s x 5)"
+    pidstat -d 1 5 | sed -n '1,5p;$p'
+  else
+    echo "Install iotop or sysstat (pidstat) for per-process I/O."
+  fi
+}
+
+open_fds() {
+  hdr "OPEN FILE DESCRIPTORS (top 15, /proc-based — no Docker spam)"
+  if [[ -d /proc/1/fd ]]; then
+    {
+      printf "%-8s %-6s %s\n" "PID" "FDs" "CMD"
+      for p in /proc/[0-9]*; do
+        pid=${p##*/}
+        fds=$(ls -1 "$p/fd" 2>/dev/null | wc -l)
+        if [[ -r "$p/cmdline" ]]; then
+          cmd=$(tr -d '\0' < "$p/cmdline" 2>/dev/null)
+        fi
+        [[ -z "${cmd:-}" && -r "$p/comm" ]] && cmd=$(<"$p/comm")
+        [[ -z "${cmd:-}" ]] && cmd="(unknown)"
+        printf "%-8s %-6s %s\n" "$pid" "$fds" "${cmd:0:140}"
+      done
+    } | awk 'NR==1{print;next} NR>1{print | "sort -k2,2nr"}' | head -n 16
+  else
+    lsof -nP -w 2>/dev/null | awk '{print $1}' | sort | uniq -c | sort -nr | head -n 15
+  fi
+}
+
+kernel_err_warn() {
+  hdr "KERNEL ERR/WARN (last 40)"
+  if dmesg --ctime >/dev/null 2>&1; then
+    dmesg --ctime 2>/dev/null | egrep -i "error|fail|warn|oom|call trace" | tail -n 40 || echo "dmesg not readable (need root / secure_boot)."
+  else
+    dmesg 2>/dev/null | egrep -i "error|fail|warn|oom|call trace" | tail -n 40 || echo "dmesg not readable or unsupported on this OS."
+  fi
+}
+
+network_top_talkers() {
+  hdr "NETWORK TOP TALKERS (connection counts by remote IP/host)"
+  if command -v ss >/dev/null 2>&1; then
+    ss -tna state established | awk 'NR>1 {print $5}' | sed 's/:[0-9]*$//' \
+      | sort | uniq -c | sort -nr | head -n 15
+  else
+    netstat -ant 2>/dev/null | awk '$6=="ESTABLISHED"{print $5}' | sed 's/:[0-9]*$//' \
+      | sort | uniq -c | sort -nr | head -n 15
+  fi
+}
+
+disk_pressure() {
+  hdr "DISK PRESSURE (I/O wait & queue — 1 sample)"
+  if command -v iostat >/dev/null 2>&1; then
+    if [[ "$OS" == "Darwin" ]]; then
+      iostat -d 1 2 2>/dev/null | tail -n 20 || iostat 1 2 | tail -n 20
+    else
+      iostat -xz 1 2 | sed -n '/Device/,/^\s*$/p' | tail -n +2
+    fi
+  else
+    echo "Install sysstat for iostat."
+  fi
+}
+
+memory_pressure() {
+  hdr "MEMORY PRESSURE (vmstat 1s x 5)"
+  if command -v vmstat >/dev/null 2>&1; then
+    vmstat 1 5
+  elif [[ "$OS" == "Darwin" ]] && command -v vm_stat >/dev/null 2>&1; then
+    vm_stat 1 5 2>/dev/null || vm_stat
+  else
+    echo "Install procps for vmstat (or use vm_stat on macOS)."
+  fi
+}
+
+main() {
+  hdr "SYSTEM LOAD"
+  uptime
+
+  cpu_hogs
+  mem_hogs
+  disk_usage
+  inode_usage
+  io_hogs
+  open_fds
+  kernel_err_warn
+  network_top_talkers
+  disk_pressure
+  memory_pressure
+
+  hdr "SUMMARY DONE"
+}
+
+
+main "$@"

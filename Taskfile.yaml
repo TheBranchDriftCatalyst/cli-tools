@@ -2,7 +2,7 @@ version: 3
 
 vars:
   CMD_SRC:
-    sh: realpath ./cmd
+    sh: realpath ./src/go/cmd
   DEPLOY_BIN:
     sh: realpath ~/bin
   CLI_BIN:
