@@ -538,13 +538,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "up", "k":
-			m.tbl.CursorUp()
+			m.tbl.MoveUp(1)
 		case "down", "j":
-			m.tbl.CursorDown()
+			m.tbl.MoveDown(1)
 		case "pgup":
-			for i := 0; i < 10; i++ { m.tbl.CursorUp() }
+			m.tbl.MoveUp(10)
 		case "pgdown":
-			for i := 0; i < 10; i++ { m.tbl.CursorDown() }
+			m.tbl.MoveDown(10)
 		case "r":
 			return m, refreshCmd(m.cfg, m.log)
 		case "/":
