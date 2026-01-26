@@ -1,0 +1,185 @@
+name: Test CLI Tools
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-go:
+    name: Test Go Applications
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.21', '1.22']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Install Task
+      uses: arduino/setup-task@v1
+      with:
+        version: 3.x
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Build CLI tools
+      run: task build
+
+    - name: Run Go tests
+      run: task test:go
+
+    - name: Run Go tests with coverage
+      run: task test:coverage
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.out
+        flags: go-tests
+        name: go-coverage
+
+  test-shell:
+    name: Test Shell Scripts
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Task
+      uses: arduino/setup-task@v1
+      with:
+        version: 3.x
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y shellcheck
+
+    - name: Set up Go (needed for building)
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.22'
+
+    - name: Build CLI tools
+      run: task build
+
+    - name: Make test scripts executable
+      run: chmod +x test_shell_scripts.sh
+
+    - name: Run shell script tests
+      run: task test:shell
+
+    - name: Lint shell scripts
+      run: task lint:shell
+
+  test-bats:
+    name: Test with BATS
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Task
+      uses: arduino/setup-task@v1
+      with:
+        version: 3.x
+
+    - name: Install BATS
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bats
+
+    - name: Set up Go (needed for building)
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.22'
+
+    - name: Build CLI tools
+      run: task build
+
+    - name: Run BATS tests
+      run: task test:bats
+
+  lint:
+    name: Lint Code
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.22'
+
+    - name: Install Task
+      uses: arduino/setup-task@v1
+      with:
+        version: 3.x
+
+    - name: Install linters
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.54.2
+        sudo apt-get update
+        sudo apt-get install -y shellcheck
+
+    - name: Lint Go code
+      run: task lint:go
+
+    - name: Lint shell scripts
+      run: task lint:shell
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [test-go, test-shell]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.22'
+
+    - name: Install Task
+      uses: arduino/setup-task@v1
+      with:
+        version: 3.x
+
+    - name: Install Docker (for dexec tests)
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build and test
+      run: |
+        task build
+        task test
+
+    - name: Test installation
+      run: |
+        task install
+        # Test that installed binaries work
+        if [ -f ~/bin/catalystTest ]; then
+          ~/bin/catalystTest
+        fi

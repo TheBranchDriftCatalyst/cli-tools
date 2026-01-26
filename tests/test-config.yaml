@@ -1,0 +1,47 @@
+# Test Configuration for CLI Tools
+test_config:
+  go:
+    packages:
+      - ./src/go/cmd/catalystTest
+      - ./src/go/cmd/multiProcCLI
+      - ./src/go/cmd/stor
+      - ./src/go/cmd/unstor
+      - ./src/go/cmd/clean_branches
+    coverage:
+      enabled: true
+      threshold: 70
+      output: tests/coverage.out
+      html: tests/coverage.html
+
+  shell:
+    scripts:
+      - name: git-undo
+        path: bin/git-undo
+        type: bash
+        requires_git: true
+      - name: dexec
+        path: bin/dexec
+        type: zsh
+        requires: [docker, fzf]
+      - name: git-cal
+        path: bin/git-cal
+        type: shell
+        requires_git: true
+      - name: git-url
+        path: bin/git-url
+        type: shell
+        requires_git: true
+
+  integration:
+    scenarios:
+      - name: full_workflow
+        description: Test complete build and install workflow
+        steps:
+          - task build
+          - task install
+          - test installed binaries
+
+  ci:
+    go_versions: ["1.21", "1.22"]
+    os_matrix: ["ubuntu-latest", "macos-latest"]
+    parallel: true
