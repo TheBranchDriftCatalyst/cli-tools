@@ -49,14 +49,15 @@
       "Bash(wc:*)",
       "Bash(for:*)",
       "Bash(find:*)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(git merge:*)"
     ],
     "deny": [],
     "ask": []
   },
+  "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "linear",
     "beads"
-  ],
-  "enableAllProjectMcpServers": true
+  ]
 }
