@@ -1,0 +1,42 @@
+# Catalyst Repository Metadata
+# This file defines metadata for each repository to be used by the profile page generator
+
+# Repository Information
+name: "cli-tools"
+description: "Go-based CLI utilities including multiProcCLI, stor/unstor file management, and more"
+repo_url: ""  # Git remote needs to be fixed
+
+# Visibility
+private: true
+
+# Repository Status (active, archived, wip, experimental)
+status: "active"
+
+# Tech Stack
+tech_stack:
+  languages:
+    - "go"
+    - "shell"
+  frameworks: []
+  tools:
+    - "air"
+    - "task"
+
+# Grouping/Categories (for organizing on profile page)
+groups:
+  - "catalyst-core"
+  - "cli"
+  - "tools"
+
+# Badge Configuration (optional - will use defaults if not specified)
+badges:
+  stars: false
+  issues: false
+  prs: false
+  license: false
+
+# Custom highlights (optional - used for non-AI manual highlights)
+highlights:
+  - "Terminal UI for multi-process management"
+  - "File storage with symlink utilities"
+  - "Hot reload development with Air"
