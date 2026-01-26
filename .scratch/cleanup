@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  MAC SPACE BLITZ — concurrent cleanup + space accounting (cyberpunk edition)
+# ──────────────────────────────────────────────────────────────────────────────
+
+CYAN='\033[36m'; MAG='\033[35m'; GRN='\033[32m'; YEL='\033[33m'; RED='\033[31m'; DIM='\033[2m'; BLD='\033[1m'; RST='\033[0m'
+
+banner() {
+  printf "${MAG}${BLD}
+███╗   ███╗ █████╗  ██████╗      ██████╗ ██████╗  ██████╗
+████╗ ████║██╔══██╗██╔════╝      ██╔══██╗██╔══██╗██╔════╝
+██╔████╔██║███████║██║  ███╗     ██████╔╝██████╔╝██║  ███╗
+██║╚██╔╝██║██╔══██║██║   ██║     ██╔═══╝ ██╔══██╗██║   ██║
+██║ ╚═╝ ██║██║  ██║╚██████╔╝     ██║     ██║  ██║╚██████╔╝
+╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝      ╚═╝     ╚═╝  ╚═╝ ╚═════╝
+${RST}\n${DIM}Concurrent Homebrew, Docker, Xcode, and dev-cache purge with space tracking${RST}\n\n"
+}
+hr() { printf "${DIM}────────────────────────────────────────────────────────────────────────────${RST}\n"; }
+human() { awk 'function h(x){s="B K M G T P";while(x>=1024&&length(s)>1){x/=1024;s=substr(s,3)};printf("%.2f %s",x,substr(s,1,1))} {h($1)}'; }
+ask() { read -r -p "$(printf "${YEL}$* [y/N]: ${RST}")" a || true; [[ ${a:-} =~ ^[Yy]$ ]]; }
+
+# -- deps ----------------------------------------------------------------------
+ensure_brew() {
+  if ! command -v brew >/dev/null 2>&1; then
+    echo -e "${YEL}Homebrew not found.${RST}"
+    ask "Install Homebrew now?" && /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || {
+      echo -e "${RED}Brew is required. Aborting.${RST}"; exit 1; }
+  fi
+}
+ensure_tool() { # check-cmd, install-cmd, label
+  local check="$1" install="$2" label="$3"
+  if ! bash -lc "$check" >/dev/null 2>&1; then
+    echo -e "${YEL}Missing:${RST} $label"
+    ask "Install $label?" && bash -lc "$install" && echo -e "${GRN}Installed:${RST} $label"
+  fi
+}
+
+# -- accounting ----------------------------------------------------------------
+fs_free_bytes(){ df -k / | awk 'NR==2{print $4*1024}'; }
+du_bytes(){ (du -sk "$@" 2>/dev/null || true) | awk '{s+=$1} END{print s*1024}'; }
+
+# -- run task in background; write "<name>:<bytes>" to a temp file -------------
+run_task(){ # name |paths... -- command...
+  local name="$1"; shift
+  local pre_paths=() cmd=() sep=0
+  for a in "$@"; do
+    if [[ $sep -eq 0 && "$a" == "--" ]]; then sep=1; continue; fi
+    [[ $sep -eq 0 ]] && pre_paths+=("$a") || cmd+=("$a")
+  done
+  (
+    local before_fs before_paths after_fs after_paths saved
+    before_fs=$(fs_free_bytes)
+    [[ ${#pre_paths[@]} -gt 0 ]] && before_paths=$(du_bytes "${pre_paths[@]}") || before_paths=0
+    # execute
+    bash -lc "${cmd[*]}" || true
+    after_fs=$(fs_free_bytes)
+    [[ ${#pre_paths[@]} -gt 0 ]] && after_paths=$(du_bytes "${pre_paths[@]}") || after_paths=0
+    local path_delta=$((before_paths - after_paths))
+    local fs_delta=$((after_fs - before_fs))
+    saved=$(( path_delta>fs_delta ? path_delta : fs_delta ))
+    echo "$name:$saved" >"$TMPDIR_BLITZ/$name.result"
+  ) &
+}
+
+main(){
+  banner
+  [[ "$(uname -s)" == "Darwin" ]] || { echo "macOS only"; exit 1; }
+  ensure_brew
+
+  # Optional helpers via brew
+  ensure_tool "command -v mac-cleanup" \
+              "brew tap fwartner/tap && brew install fwartner/tap/mac-cleanup" \
+              "mac-cleanup"
+  ensure_tool "brew tap | grep -q '^mac-cleanup/mac-cleanup-py$'" \
+              "brew tap mac-cleanup/mac-cleanup-py" "tap mac-cleanup-py"
+  ensure_tool "command -v mac-cleanup || command -v mac-cleanup-py" \
+              "brew install mac-cleanup-py" "mac-cleanup-py"
+
+  # Paths we track
+  BREW_CACHE="$(brew --cache 2>/dev/null || echo "$HOME/Library/Caches/Homebrew")"
+  CHROME_CACHE="$HOME/Library/Caches/Google/Chrome"
+  XCODE_DERIVED="$HOME/Library/Developer/Xcode/DerivedData"
+  XCODE_ARCHIVES="$HOME/Library/Developer/Xcode/Archives"
+  XCODE_DOCSETS="$HOME/Library/Developer/Shared/Documentation/DocSets"
+  XCODE_CACHE="$HOME/Library/Caches/com.apple.dt.Xcode"
+  SIM_ROOT="$HOME/Library/Developer/CoreSimulator"
+  NPM_CACHE="$(npm config get cache 2>/dev/null || echo "$HOME/.npm")"
+  YARN_CACHE_DIR="$(yarn cache dir 2>/dev/null || echo "$HOME/Library/Caches/Yarn")"
+  PIP_CACHE_DIR="$(python3 -m pip cache dir 2>/dev/null || echo "$HOME/Library/Caches/pip")"
+
+  echo -e "${CYAN}Launching cleanup tasks in parallel...${RST}"
+  mkdir -p "$TMPDIR_BLITZ"
+
+  # Homebrew
+  run_task "brew-cleanup" "$BREW_CACHE" -- "brew cleanup --prune=all -s"   # aggressive brew cleanup :contentReference[oaicite:5]{index=5}
+  run_task "brew-autoremove" -- "brew autoremove || true"
+  run_task "brew-cache-wipe" "$BREW_CACHE" -- "rm -rf \"${BREW_CACHE}\"/* 2>/dev/null || true"
+
+  # mac-cleanup tools (optional)
+  command -v mac-cleanup >/dev/null 2>&1 && \
+    run_task "mac-cleanup" "$CHROME_CACHE" -- "yes | mac-cleanup || mac-cleanup || true"
+  command -v mac-cleanup >/dev/null 2>&1 && \
+    run_task "mac-cleanup-py" "$HOME/Library/Caches" "$HOME/Library/Logs" -- "mac-cleanup --yes --quiet 2>/dev/null || mac-cleanup 2>/dev/null || true"
+
+  # Docker (confirm; destructive)
+  if command -v docker >/dev/null 2>&1; then
+    if ask "Prune Docker: images/containers/networks/cache? (keeps volumes)"; then
+      run_task "docker-system-prune" -- "docker system prune -af"  # per docs :contentReference[oaicite:6]{index=6}
+    fi
+    if ask "Also prune anonymous volumes? (can delete data)"; then
+      run_task "docker-volumes" -- "docker system prune -af --volumes"      # volumes too :contentReference[oaicite:7]{index=7}
+    fi
+    if ask "Prune Docker build cache (builder prune)?"; then
+      run_task "docker-builder-prune" -- "docker builder prune -af"         # build cache :contentReference[oaicite:8]{index=8}
+    fi
+    if command -v docker >/dev/null 2>&1 && docker buildx version >/dev/null 2>&1; then
+      if ask "Prune buildx cache?"; then
+        run_task "docker-buildx-prune" -- "docker buildx prune -af"         # buildx cache :contentReference[oaicite:9]{index=9}
+      fi
+    fi
+  fi
+
+  # Xcode (confirm each)
+  if [[ -d "$XCODE_DERIVED" ]] && ask "Purge Xcode DerivedData?"; then
+    run_task "xcode-derived" "$XCODE_DERIVED" -- "rm -rf \"$XCODE_DERIVED\"/*"   # safe to delete :contentReference[oaicite:10]{index=10}
+  fi
+  if [[ -d "$XCODE_ARCHIVES" ]] && ask "Delete Xcode Archives older than 30 days?"; then
+    run_task "xcode-archives" "$XCODE_ARCHIVES" -- "find \"$XCODE_ARCHIVES\" -type d -maxdepth 2 -mtime +30 -print0 | xargs -0 rm -rf" # archives mgmt :contentReference[oaicite:11]{index=11}
+  fi
+  if [[ -d "$SIM_ROOT" ]] && ask "Reset CoreSimulator data/caches? (will wipe simulators)"; then
+    run_task "xcode-simulators" "$SIM_ROOT" -- "rm -rf \"$SIM_ROOT\"/Devices \"$SIM_ROOT\"/Caches  \"$SIM_ROOT\"/Temporary || true"  # safe; Xcode recreates :contentReference[oaicite:12]{index=12}
+  fi
+  if [[ -d "$XCODE_DOCSETS" ]] && ask "Remove Xcode offline DocSets?"; then
+    run_task "xcode-docsets" "$XCODE_DOCSETS" -- "rm -rf \"$XCODE_DOCSETS\"/*"   # docsets safe :contentReference[oaicite:13]{index=13}
+  fi
+  if [[ -d "$XCODE_CACHE" ]] && ask "Clear com.apple.dt.Xcode cache?"; then
+    run_task "xcode-cache" "$XCODE_CACHE" -- "rm -rf \"$XCODE_CACHE\""           # cache safe :contentReference[oaicite:14]{index=14}
+  fi
+
+  # Dev caches (Node/Python/Go/CocoaPods)
+  command -v npm >/dev/null 2>&1 && \
+    run_task "npm-cache" "$NPM_CACHE" -- "npm cache clean --force >/dev/null 2>&1 || true"   # :contentReference[oaicite:15]{index=15}
+  command -v yarn >/dev/null 2>&1 && \
+    run_task "yarn-cache" "$YARN_CACHE_DIR" -- "yarn cache clean >/dev/null 2>&1 || true"     # :contentReference[oaicite:16]{index=16}
+  command -v pnpm >/dev/null 2>&1 && \
+    run_task "pnpm-store" -- "pnpm store prune >/dev/null 2>&1 || true"                       # :contentReference[oaicite:17]{index=17}
+  command -v python3 >/dev/null 2>&1 && \
+    run_task "pip-cache" "$PIP_CACHE_DIR" -- "python3 -m pip cache purge >/dev/null 2>&1 || true" # :contentReference[oaicite:18]{index=18}
+  command -v go >/dev/null 2>&1 && \
+    run_task "go-cache" -- "go clean -cache -testcache -modcache >/dev/null 2>&1 || true"     # :contentReference[oaicite:19]{index=19}
+}
+
+# ---------- execution / collection ----------
+TMPDIR_BLITZ="$(mktemp -d)"
+START_FREE=$(fs_free_bytes)
+main
+wait
+
+TOTAL_SAVED=$(( $(fs_free_bytes) - START_FREE ))
+echo
+hr
+echo -e "${BLD}${CYAN}Cleanup Results${RST}"
+for f in "$TMPDIR_BLITZ"/*.result 2>/dev/null; do
+  n="$(basename "$f" .result)"; v="$(cut -d: -f2 < "$f")"
+  printf "  ${MAG}%-22s${RST} %s\n" "$n" "$(printf "%s" "${v:-0}" | human)"
+done
+hr
+printf "  ${GRN}TOTAL RECLAIMED          ${RST}%s\n" "$(printf "%s" "$TOTAL_SAVED" | human)"
+hr
+rm -rf "$TMPDIR_BLITZ"
+echo -e "${DIM}Done.${RST}"

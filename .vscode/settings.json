@@ -5,7 +5,11 @@
     },
     "go.alternateTools": {
         "go": "/Users/panda/.local/share/mise/shims/go",
-        "dlv": "/Users/panda/.local/share/mise/shims/dlv"
+        "dlv": "/Users/panda/.local/share/mise/shims/dlv",
+        "gopls": "/Users/panda/.local/share/mise/shims/gopls"
     },
-    "python.defaultInterpreterPath": "/Users/panda/.local/share/mise/installs/python/3.12.6/bin/python"
+    "python.defaultInterpreterPath": "/Users/panda/.local/share/mise/installs/python/3.12.6/bin/python",
+    "yaml.schemas": {
+        "https://www.artillery.io/schema.json": []
+    }
 }
