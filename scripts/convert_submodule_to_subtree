@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+log(){ echo "[INFO] $*"; }
+
+if ! command -v fzf &>/dev/null; then
+  echo "❌  fzf is required but not installed" >&2
+  exit 1
+fi
+if ! command -v git &>/dev/null; then
+  echo "❌  git is required but not installed" >&2
+  exit 1
+fi
+
+mapfile -t entries < <(
+  git config -f .gitmodules --get-regexp 'submodule\..*\.path'
+)
+if [[ ${#entries[@]} -eq 0 ]]; then
+  echo "❌  no submodules found in .gitmodules" >&2
+  exit 1
+fi
+
+declare -A section_for_path
+paths=()
+for e in "${entries[@]}"; do
+  sect=${e%%.path *}
+  sect=${sect#submodule.}
+  path=${e#* }
+  section_for_path[$path]=$sect
+  paths+=("$path")
+done
+
+selected=$(printf '%s\n' "${paths[@]}" | fzf \
+  --height 20% --border --prompt="Select submodule → " \
+) || { echo "✋  aborted"; exit 1; }
+
+log "you picked: $selected"
+sect=${section_for_path[$selected]}
+url=$(git config -f .gitmodules --get submodule."$sect".url)
+branch=$(git config -f .gitmodules --get submodule."$sect".branch || echo master)
+
+# If the path already exists, move it to temp
+if [[ -e "$selected" ]]; then
+  backup_dir="$(mktemp -d "/tmp/${selected////}_backup_XXXXXX")"
+  log "⚠️  $selected exists, moving to $backup_dir"
+  mv "$selected" "$backup_dir/"
+fi
+
+log "deinit & rm submodule $selected"
+git submodule deinit -f -- "$selected"
+git rm -f -- "$selected"
+rm -rf -- ".git/modules/$selected"
+
+log "committing removal of submodule $selected"
+git commit -am "Remove submodule $selected"
+
+log "adding subtree at prefix=$selected from $url@$branch"
+git remote add "$sect" "$url" \
+  && log "remote '$sect' registered" \
+  || {
+    log "remote '$sect' exists, updating URL"
+    git remote set-url "$sect" "$url"
+  }
+
+git fetch "$sect"
+git subtree add --prefix="$selected" "$sect" "$branch" --squash
+
+log "✅  converted '$selected' to a subtree"
+
+# Clean up backup
+if [[ -n "${backup_dir:-}" && -d "$backup_dir" ]]; then
+  log "🧹  removing backup dir $backup_dir"
+  rm -rf "$backup_dir"
+fi

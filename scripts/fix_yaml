@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+root_dir="${1:-.}"
+renamed_count=0
+updated_files=0
+
+# Colors
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+RED='\033[1;31m'
+RESET='\033[0m'
+BOLD='\033[1m'
+
+echo -e "${CYAN}🔎 Scanning directory:${RESET} ${BOLD}$root_dir${RESET}"
+echo ""
+
+# Step 1: Rename .yaml → .yml
+echo -e "${YELLOW}📦 Renaming .yaml files → .yml...${RESET}"
+find "$root_dir" -type f -name "*.yaml" | while read -r yaml_file; do
+    yml_file="${yaml_file%.yaml}.yml"
+    echo -e "  📝 ${BOLD}Renamed:${RESET} $yaml_file → ${GREEN}$yml_file${RESET}"
+    mv "$yaml_file" "$yml_file"
+    ((renamed_count++))
+done
+
+if [[ $renamed_count -eq 0 ]]; then
+    echo -e "  ⚠️  No .yaml files found to rename."
+fi
+
+echo ""
+
+# Step 2: Replace .yaml → .yml inside files
+echo -e "${YELLOW}🧹 Updating references in file contents...${RESET}"
+
+extensions="yml sh py json md txt conf toml ini js ts html css"
+for ext in $extensions; do
+    find "$root_dir" -type f -name "*.$ext" | while read -r file; do
+        if grep -q '\.yaml' "$file"; then
+            sed -i'' -e 's/\.yaml/\.yml/g' "$file"
+            echo -e "  🔧 ${BOLD}Updated:${RESET} $file"
+            ((updated_files++))
+        fi
+    done
+done
+
+if [[ $updated_files -eq 0 ]]; then
+    echo -e "  ⚠️  No .yaml references found in content."
+fi
+
+echo ""
+echo -e "${GREEN}✅ Done!${RESET}"
+echo -e "  📝 ${BOLD}Files renamed:${RESET}     $renamed_count"
+echo -e "  🔧 ${BOLD}Files updated:${RESET}    $updated_files"
+
+# Git sanity check
+if ! git -C "$root_dir" rev-parse --is-inside-work-tree &>/dev/null; then
+    echo ""
+    echo -e "${RED}⚠️  WARNING:${RESET} ${BOLD}You are not in a Git repo.${RESET}"
+    echo -e "    Run this in a version-controlled project or prepare for consequences, dawg. 🔥"
+fi
+
+echo ""

@@ -1,8 +1,8 @@
 version: 3
 
 vars:
-  CMD_SRC:
-    sh: realpath ./src/go/cmd
+  CMD_DIR:
+    sh: realpath ./cmd
   LOCAL_BIN:
     sh: realpath ./bin
 
@@ -11,7 +11,7 @@ tasks:
     desc: Build Go CLI commands
     silent: false
     sources:
-      - "{{ .CMD_SRC }}/**/main.go"
+      - "{{ .CMD_DIR }}/**/main.go"
     generates:
       - "{{ .LOCAL_BIN }}/*"
     cmds:
@@ -29,24 +29,20 @@ tasks:
   fmt:
     desc: Format Go code
     cmds:
-      - go fmt ./src/go/...
-      - cd src/go/cmd/wipctl && go fmt ./...
+      - go fmt ./cmd/...
 
   vet:
     desc: Run go vet on Go code
     cmds:
-      - go vet ./src/go/...
-      - cd src/go/cmd/wipctl && go vet ./...
+      - go vet ./cmd/...
 
   lint:
     desc: Lint Go code
     cmds:
       - |
         if command -v golangci-lint >/dev/null 2>&1; then
-          golangci-lint run ./src/go/...
-          cd src/go/cmd/wipctl && golangci-lint run ./...
+          golangci-lint run ./cmd/...
         else
           echo "golangci-lint not installed. Install with: brew install golangci-lint"
-          go vet ./src/go/...
-          cd src/go/cmd/wipctl && go vet ./...
+          go vet ./cmd/...
         fi

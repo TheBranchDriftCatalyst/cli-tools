@@ -5,7 +5,7 @@ This repository includes comprehensive test coverage for both Go CLI application
 ## Test Organization
 
 ```
-├── src/go/cmd/                   # Go source code with co-located tests
+├── cmd/                   # Go source code with co-located tests
 │   ├── catalystTest/
 │   │   ├── main.go
 │   │   └── main_test.go
@@ -239,7 +239,7 @@ Current test coverage includes:
 
 ```bash
 # Run specific test with verbose output
-go test -v ./src/go/cmd/catalystTest/
+go test -v ./cmd/catalystTest/
 
 # Run single BATS test
 bats -t test_dexec.bats

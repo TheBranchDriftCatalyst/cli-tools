@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.21', '1.22']
+        go-version: ['1.24']
 
     steps:
     - name: Checkout code
@@ -76,7 +76,7 @@ jobs:
     - name: Set up Go (needed for building)
       uses: actions/setup-go@v4
       with:
-        go-version: '1.22'
+        go-version: '1.24'
 
     - name: Build CLI tools
       run: task build
@@ -88,7 +88,7 @@ jobs:
       run: task test:shell
 
     - name: Lint shell scripts
-      run: task lint:shell
+      run: task shell:lint
 
   test-bats:
     name: Test with BATS
@@ -111,7 +111,7 @@ jobs:
     - name: Set up Go (needed for building)
       uses: actions/setup-go@v4
       with:
-        go-version: '1.22'
+        go-version: '1.24'
 
     - name: Build CLI tools
       run: task build
@@ -130,24 +130,26 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: '1.22'
+        go-version: '1.24'
 
     - name: Install Task
       uses: arduino/setup-task@v1
       with:
         version: 3.x
 
-    - name: Install linters
+    - name: Install shellcheck
       run: |
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.54.2
         sudo apt-get update
         sudo apt-get install -y shellcheck
 
     - name: Lint Go code
-      run: task lint:go
+      uses: golangci/golangci-lint-action@v6
+      with:
+        version: v1.64
+        args: ./cmd/...
 
     - name: Lint shell scripts
-      run: task lint:shell
+      run: task shell:lint
 
   integration:
     name: Integration Tests
@@ -161,7 +163,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: '1.22'
+        go-version: '1.24'
 
     - name: Install Task
       uses: arduino/setup-task@v1
@@ -174,7 +176,7 @@ jobs:
     - name: Build and test
       run: |
         task build
-        task test
+        task test:all
 
     - name: Test installation
       run: |

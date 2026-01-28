@@ -9,11 +9,10 @@ includes:
   ci: ./taskfiles/Taskfile.ci.yaml
 
 vars:
-  CMD_SRC:
-    sh: realpath ./src/go/cmd
-  REAL_BIN:
-    # NOTE that this is out of repo scope!!!! for now
-    sh: realpath ~/bin
+  CMD_DIR:
+    sh: realpath ./cmd
+  SCRIPTS_DIR:
+    sh: realpath ./scripts
   LOCAL_BIN:
     sh: realpath ./bin
 
@@ -35,7 +34,7 @@ tasks:
 
   permissions:
     desc: Set permissions for the binary files
-    sources: [ "{{ .LOCAL_BIN }}/*", "shell/*" ]
+    sources: [ "{{ .LOCAL_BIN }}/*", "{{ .SCRIPTS_DIR }}/*" ]
     cmds:
       - for: sources
         cmd: chmod +x {{ .ITEM }}

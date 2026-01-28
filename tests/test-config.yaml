@@ -2,11 +2,11 @@
 test_config:
   go:
     packages:
-      - ./src/go/cmd/catalystTest
-      - ./src/go/cmd/multiProcCLI
-      - ./src/go/cmd/stor
-      - ./src/go/cmd/unstor
-      - ./src/go/cmd/clean_branches
+      - ./cmd/catalystTest
+      - ./cmd/multiProcCLI
+      - ./cmd/stor
+      - ./cmd/unstor
+      - ./cmd/clean_branches
     coverage:
       enabled: true
       threshold: 70

@@ -64,7 +64,7 @@ make test-verbose
 ## Test Types
 
 ### 1. Go Unit Tests
-- Located alongside source code in `src/go/cmd/*/main_test.go`
+- Located alongside source code in `cmd/*/main_test.go`
 - Use the test helpers in `tests/go/testhelpers/`
 - Cover core functionality, error handling, and edge cases
 - Run with: `make test-go`

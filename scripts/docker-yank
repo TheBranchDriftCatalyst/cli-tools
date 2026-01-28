@@ -1,0 +1,302 @@
+#!/usr/bin/env zsh
+
+# Docker Extractor Pro - Because regular extraction is for peasants
+# Usage: ./docker-extractor-pro.sh [OPTIONS]
+
+set -euo pipefail
+
+# Colors for that elite hacker aesthetic
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# Configuration - tweak these for maximum efficiency
+MAX_DEPTH=20
+PARALLEL_JOBS=4
+SHOW_SIZES=true
+COMPRESS_OUTPUT=false
+EXCLUDE_COMMON_DIRS=true
+
+# Banner because we're professionals here
+show_banner() {
+    echo -e "${PURPLE}"
+    cat << "EOF"
+    ╔══════════════════════════════════════╗
+    ║       🐳 DOCKER EXTRACTOR PRO       ║
+    ║           Elite Edition              ║
+    ╚══════════════════════════════════════╝
+EOF
+    echo -e "${RESET}"
+}
+
+# Spinner for those long operations
+spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='|/-\'
+    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
+        local temp=${spinstr#?}
+        printf " [%c]  " "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\b\b\b\b\b\b"
+    done
+    printf "    \b\b\b\b"
+}
+
+# Enhanced container selection with status and resource info
+select_container() {
+    echo -e "${CYAN}${BOLD}🔍 Scanning for containers...${RESET}"
+    
+    # Get detailed container info (no header so parsing is simpler)
+    local containers=$(docker ps --format '{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}')
+    
+    if [[ -z "$containers" ]]; then
+        echo -e "${RED}❌ No running containers found!${RESET}"
+        exit 1
+    fi
+    
+    # Format for fzf with colors and info
+    local formatted_containers
+    formatted_containers=$(echo "$containers" | while IFS=$'\t' read -r id name cstatus image ports; do
+        local short_id=${id:0:12}
+        local short_image=$(echo "$image" | cut -d: -f1 | tail -c 20)
+        # Use a tab as a reliable field separator: <short_id>\t<rest...>
+        printf "%s\t%-20s │ %-15s │ %s\n" "$short_id" "$name" "$short_image" "$cstatus"
+    done)
+
+    # Run fzf but don't let a non-zero exit code (ESC / cancel) abort the whole script due to set -e
+    local selected
+    selected=$(echo "$formatted_containers" | fzf \
+        --ansi \
+        --header="🐳 Select Container (ESC to quit)" \
+        --height=15 \
+        --border \
+        --prompt="Container ❯ " \
+        --preview='docker inspect $(echo {} | cut -f1) --format="{{.Config.Image}}" 2>/dev/null' \
+        --preview-window=up:3:hidden:wrap \
+        --bind='ctrl-/:toggle-preview') || true
+
+    if [[ -z "$selected" ]]; then
+        echo -e "${YELLOW}🚪 No container selected. Peace out!${RESET}"
+        exit 0
+    fi
+
+    # selected starts with the short id (first column)
+    echo "$selected" | awk '{print $1}'
+}
+
+# Smart directory discovery with size info and exclusions
+discover_directories() {
+    local container=$1
+    echo -e "${CYAN}${BOLD}🗂️  Mapping container filesystem...${RESET}"
+    
+    # Common directories to exclude (unless user wants them)
+    local exclude_dirs=""
+    if [[ "$EXCLUDE_COMMON_DIRS" == true ]]; then
+        exclude_dirs="-path /proc -prune -o -path /sys -prune -o -path /dev -prune -o -path /tmp -prune -o"
+    fi
+    
+    # Build find command
+    local find_cmd="find / $exclude_dirs -maxdepth $MAX_DEPTH -type d -readable"
+    
+    # Execute with progress indication
+    echo -e "${DIM}Scanning directories (depth: $MAX_DEPTH)...${RESET}"
+    local dirs_raw=$(docker exec "$container" bash -c "$find_cmd 2>/dev/null" | head -1000)
+    
+    # Add size information if enabled
+    if [[ "$SHOW_SIZES" == true ]]; then
+        echo -e "${DIM}Getting directory sizes...${RESET}"
+        # Build output in a loop and print; avoid subshell losing variables
+        while IFS= read -r dir; do
+            if [[ -n "$dir" ]]; then
+                local size
+                size=$(docker exec "$container" du -sh -- "$dir" 2>/dev/null | cut -f1 || echo "???")
+                # Print size, a tab, then path. This makes parsing predictable.
+                printf "%s\t%s\n" "$size" "$dir"
+            fi
+        done <<< "$dirs_raw"
+    else
+        echo "$dirs_raw"
+    fi
+}
+
+# Enhanced directory selection
+select_directory() {
+    local container=$1
+    
+    # Run fzf; allow cancel without failing the whole script (set -e is enabled)
+    local selection
+    # Use a bash -c wrapper so we can safely extract the path (after a tab) and pass container as $1
+    selection=$(discover_directories "$container" | fzf \
+        --ansi \
+        --header="📁 Select Directory to Extract (TAB for multi-select)" \
+        --height=20 \
+        --border \
+        --prompt="Directory ❯ " \
+        --multi \
+        --preview='bash -c '\''localpath="$(printf "%s" "{}" | cut -f2-)"; docker exec "$1" ls -la -- "$localpath" 2>/dev/null | head -20'\'' _ "$container"' \
+        --preview-window=right:50%:wrap \
+        --bind='ctrl-/:toggle-preview' \
+        --bind='alt-a:select-all' \
+        --bind='alt-d:deselect-all') || true
+
+    echo "$selection"
+}
+
+# Smart copying with progress and options
+copy_with_style() {
+    local container=$1
+    local source_path=$2
+    local dest_name=$(basename "$source_path")
+    
+    # Handle potential name conflicts
+    if [[ -e "$dest_name" ]]; then
+        local timestamp=$(date +%Y%m%d_%H%M%S)
+        dest_name="${dest_name}_${timestamp}"
+        echo -e "${YELLOW}⚠️  Destination exists, using: $dest_name${RESET}"
+    fi
+    
+    echo -e "${GREEN}${BOLD}🚀 Extracting: $source_path${RESET}"
+    echo -e "${DIM}   Container: $container${RESET}"
+    echo -e "${DIM}   Destination: ./$dest_name${RESET}"
+    
+    # Show progress for large operations
+    if [[ "$COMPRESS_OUTPUT" == true ]]; then
+        echo -e "${CYAN}📦 Creating compressed archive...${RESET}"
+        docker exec "$container" tar -czf "/tmp/extract_$$.tar.gz" -C "$(dirname "$source_path")" "$(basename "$source_path")" 2>/dev/null &
+        spinner $!
+        docker cp "$container:/tmp/extract_$$.tar.gz" "./${dest_name}.tar.gz"
+        docker exec "$container" rm "/tmp/extract_$$.tar.gz"
+        echo -e "${GREEN}✅ Compressed archive created: ${dest_name}.tar.gz${RESET}"
+    else
+        docker cp "$container:$source_path" "./$dest_name" &
+        spinner $!
+        echo -e "${GREEN}✅ Successfully extracted to: ./$dest_name${RESET}"
+    fi
+}
+
+# Stats and summary
+show_stats() {
+    local container=$1
+    echo -e "\n${PURPLE}${BOLD}📊 Operation Stats:${RESET}"
+    echo -e "${DIM}Container: $container${RESET}"
+    echo -e "${DIM}Max depth searched: $MAX_DEPTH${RESET}"
+    if [[ "$COMPRESS_OUTPUT" == true ]]; then
+        echo -e "${DIM}Compression: enabled${RESET}"
+    else
+        echo -e "${DIM}Compression: disabled${RESET}"
+    fi
+    echo -e "${GREEN}🎉 Mission accomplished!${RESET}\n"
+}
+
+# Parse command line options like a pro
+parse_options() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -d|--depth)
+                MAX_DEPTH="$2"
+                shift 2
+                ;;
+            -c|--compress)
+                COMPRESS_OUTPUT=true
+                shift
+                ;;
+            -s|--no-sizes)
+                SHOW_SIZES=false
+                shift
+                ;;
+            -a|--all-dirs)
+                EXCLUDE_COMMON_DIRS=false
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}❌ Unknown option: $1${RESET}"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+}
+
+show_help() {
+    cat << EOF
+🐳 Docker Extractor Pro - Elite Edition
+
+Usage: $0 [OPTIONS]
+
+Options:
+    -d, --depth NUM      Set maximum search depth (default: $MAX_DEPTH)
+    -c, --compress       Create compressed archives
+    -s, --no-sizes       Skip directory size calculation (faster)
+    -a, --all-dirs       Include system directories (/proc, /sys, etc.)
+    -h, --help           Show this help
+
+Pro Tips:
+    • Use TAB for multi-select in directory chooser
+    • Alt+A to select all, Alt+D to deselect all
+    • Ctrl+/ to toggle preview pane
+    • ESC to cancel at any point
+
+EOF
+}
+
+# Main execution flow
+main() {
+    parse_options "$@"
+    show_banner
+    
+    # Step 1: Select container with style
+    local container=$(select_container)
+    echo -e "${GREEN}✅ Selected container: $container${RESET}\n"
+    
+    # Step 2: Select directories (supports multi-select!)
+    local selected_dirs=$(select_directory "$container")
+    
+    if [[ -z "$selected_dirs" ]]; then
+        echo -e "${YELLOW}🤷 No directories selected. Maybe next time!${RESET}"
+        exit 0
+    fi
+    
+    # Step 3: Extract all selected directories
+    echo "$selected_dirs" | while IFS= read -r dir_line; do
+        if [[ -n "$dir_line" ]]; then
+            # If sizes are present, lines are: <size>\t<path>
+            if printf "%s" "$dir_line" | grep -q $'\t'; then
+                local dir_path=$(printf "%s" "$dir_line" | cut -f2- | xargs)
+            else
+                # Fallback: try splitting on '│' and take the last field
+                local dir_path=$(printf "%s" "$dir_line" | awk -F'│' '{print $NF}' | xargs)
+            fi
+            copy_with_style "$container" "$dir_path"
+        fi
+    done
+    
+    show_stats "$container"
+}
+
+# Error handling for the pros
+trap 'echo -e "\n${RED}💥 Operation interrupted!${RESET}"; exit 1' INT TERM
+
+# Check dependencies
+for cmd in docker fzf; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo -e "${RED}❌ Missing dependency: $cmd${RESET}"
+        echo -e "Install with: ${WHITE}brew install $cmd${RESET} (macOS) or ${WHITE}apt install $cmd${RESET} (Linux)"
+        exit 1
+    fi
+done
+
+# Let's go!
+main "$@"

@@ -1,0 +1,574 @@
+#!/usr/bin/env zsh
+# dexec — pick a running Docker container (with preview) and drop into its shell.
+# Usage: dexec [options] [-- CMD ...]
+# Dependencies: docker, fzf
+# Shell: Zsh (POSIX-ish but uses zshisms intentionally)
+
+emulate -L zsh
+set -o pipefail
+autoload -Uz colors && colors
+
+# ─── Constants ─────────────────────────────────────────────────────────────────
+typeset -r SCRIPT_NAME="${0##*/}"
+typeset -r VERSION="2.0.0"
+typeset -ra REQUIRED_CMDS=(docker fzf)
+# Try shells in this order inside the container
+typeset -ra SHELL_PREFS=(zsh fish bash ash dash sh)
+# Config file locations
+typeset -ra CONFIG_PATHS=(
+  "${XDG_CONFIG_HOME:-$HOME/.config}/dexec/config"
+  "$HOME/.dexec.conf"
+)
+
+# UI glyphs (ASCII-safe fallbacks if TERM is dumb)
+if [[ -t 1 && $TERM != dumb && $TERM != linux ]]; then
+  # Nerd Font icons
+  NEON_INFO="%F{cyan}󰣇%f"
+  NEON_ERR="%F{red}%f"
+  NEON_OK="%F{green}%f"
+  NEON_WARN="%F{yellow}⚠%f"
+  ICON_CONTAINER="󰡨"
+  ICON_SHELL="󰞷"
+  ICON_USER="󰀉"
+  ICON_HEALTH="󰓅"
+  ICON_CPU="󰍛"
+  ICON_MEM="󰑭"
+  ICON_NET="󰈀"
+  BOX_TL="┏"; BOX_TR="┓"; BOX_BL="┗"; BOX_BR="┛"; BOX_H="━"; BOX_V="┃"
+else
+  NEON_INFO="[INFO]"
+  NEON_ERR="[ERROR]"
+  NEON_OK="[OK]"
+  NEON_WARN="[WARN]"
+  ICON_CONTAINER="[C]"
+  ICON_SHELL="[S]"
+  ICON_USER="[U]"
+  ICON_HEALTH="[H]"
+  ICON_CPU="[CPU]"
+  ICON_MEM="[MEM]"
+  ICON_NET="[NET]"
+  BOX_TL="+"; BOX_TR="+"; BOX_BL="+"; BOX_BR="+"; BOX_H="-"; BOX_V="|"
+fi
+
+# ─── Configuration ────────────────────────────────────────────────────────────
+typeset -A CONFIG
+CONFIG=(
+  [default_shell]=""
+  [default_user]=""
+  [show_stats]="true"
+  [preview_logs]="20"
+  [favorite_containers]=""
+  [auto_cd_workdir]="true"
+  [fzf_height]="60%"
+)
+
+load_config() {
+  local config_file
+  for config_file in $CONFIG_PATHS; do
+    if [[ -r "$config_file" ]]; then
+      source "$config_file" 2>/dev/null || true
+      break
+    fi
+  done
+}
+
+# ─── Logging ───────────────────────────────────────────────────────────────────
+log_info()  { (( quiet )) || print -P "${NEON_INFO} %F{cyan}$*%f"; }
+log_error() { print -P "${NEON_ERR} %F{red}$*%f" >&2; }
+log_ok()    { (( quiet )) || print -P "${NEON_OK} %F{green}$*%f"; }
+log_warn()  { (( quiet )) || print -P "${NEON_WARN} %F{yellow}$*%f"; }
+
+banner() {
+  local title="$1"
+  local line="$(printf '%0.s'"$BOX_H" {1..70})"
+  print -P "%F{magenta}${BOX_TL}${line}${BOX_TR}%f"
+  print -P "%F{magenta}${BOX_V}%f %F{magenta}${title}%f %F{blue}v${VERSION}%f"
+  print -P "%F{magenta}${BOX_BL}${line}${BOX_BR}%f"
+}
+
+# ─── Utility functions ─────────────────────────────────────────────────────────
+human_size() {
+  local bytes="$1"
+  if (( bytes >= 1073741824 )); then
+    printf "%.1fG" $((bytes / 1073741824.0))
+  elif (( bytes >= 1048576 )); then
+    printf "%.1fM" $((bytes / 1048576.0))
+  elif (( bytes >= 1024 )); then
+    printf "%.1fK" $((bytes / 1024.0))
+  else
+    printf "%dB" "$bytes"
+  fi
+}
+
+format_uptime() {
+  local started="$1"
+  local now="$(date +%s)"
+  local start_epoch="$(date -d "$started" +%s 2>/dev/null || echo "$now")"
+  local uptime=$((now - start_epoch))
+  
+  if (( uptime >= 86400 )); then
+    printf "%dd %dh" $((uptime / 86400)) $(((uptime % 86400) / 3600))
+  elif (( uptime >= 3600 )); then
+    printf "%dh %dm" $((uptime / 3600)) $(((uptime % 3600) / 60))
+  elif (( uptime >= 60 )); then
+    printf "%dm %ds" $((uptime / 60)) $((uptime % 60))
+  else
+    printf "%ds" "$uptime"
+  fi
+}
+
+get_container_stats() {
+  local cid="$1"
+  if [[ "$CONFIG[show_stats]" != "true" ]]; then
+    return 0
+  fi
+  
+  # Get stats in one go (faster than multiple docker calls)
+  docker stats --no-stream --format "{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}" "$cid" 2>/dev/null
+}
+
+# ─── Usage ─────────────────────────────────────────────────────────────────────
+usage() {
+  cat <<'EOF'
+dexec — fuzzy-pick a running Docker container with live preview, then exec into the best available shell.
+
+Usage:
+  dexec [options] [-- CMD ...]
+
+Options:
+  -c, --container NAME    Non-interactive: target this container by name/ID
+  -s, --shell SHELL       Force shell inside container (zsh|fish|bash|ash|dash|sh)
+  -u, --user USER         Exec as this user (name or UID). Use --root for UID 0
+      --root              Shortcut for -u 0
+  -w, --workdir DIR       Set working directory inside container
+  -n, --no-tty            Do not allocate a TTY (default: allocate)
+  -e, --env KEY=VAL       Set environment variable (can be used multiple times)
+      --privileged        Run in privileged mode
+  -f, --filter PATTERN    Filter containers by name/image pattern
+      --all               Show all containers (including stopped)
+      --favorites         Show only favorite containers from config
+  -q, --quiet             Quieter logging
+  -v, --verbose           Verbose output
+      --stats             Force show container stats in preview
+      --no-stats          Force hide container stats in preview  
+      --recent            Show recently used containers first
+  -h, --help              Show help and exit
+      --version           Show version
+      --emit-completion   Print zsh completion to stdout
+      --config            Show config file locations
+
+Examples:
+  dexec                           # Interactive container selection
+  dexec -c api-1                  # Direct container access
+  dexec -c api-1 --root           # Access as root user
+  dexec -c api-1 -- ls -al /etc   # Run specific command
+  dexec -s fish -u 1000           # Force fish shell as user 1000
+  dexec -f "nginx|apache"         # Filter by pattern
+  dexec --all -f "exited"         # Show stopped containers too
+  dexec -e DEBUG=1 -e LOG_LEVEL=trace  # Set environment variables
+
+Config file locations (first found is used):
+  ${XDG_CONFIG_HOME:-$HOME/.config}/dexec/config
+  $HOME/.dexec.conf
+
+Sample config file:
+  CONFIG[default_shell]="fish"
+  CONFIG[default_user]="1000"
+  CONFIG[show_stats]="false"
+  CONFIG[preview_logs]="30"
+  CONFIG[favorite_containers]="api web db cache"
+  CONFIG[auto_cd_workdir]="true"
+  CONFIG[fzf_height]="70%"
+EOF
+  exit 0
+}
+
+# ─── Enhanced Completions ──────────────────────────────────────────────────────
+emit_completion() {
+  cat <<'ZSHCOMP'
+#compdef dexec
+# Enhanced zsh completion for dexec v2.0
+local -a _dexec_opts _dexec_shells _dexec_containers
+_dexec_opts=(
+  '(-c --container)'{-c,--container}'[container name or ID]:container:->containers'
+  '(-s --shell)'{-s,--shell}'[force shell]:shell:(zsh fish bash ash dash sh)'
+  '(-u --user)'{-u,--user}'[user or UID]:user:->users'
+  '--root[exec as root (UID 0)]'
+  '(-w --workdir)'{-w,--workdir}'[workdir]:dir:_path_files -/'
+  '(-n --no-tty)'{-n,--no-tty}'[disable TTY]'
+  '(-e --env)'{-e,--env}'[environment variable]:env var:'
+  '--privileged[run in privileged mode]'
+  '(-f --filter)'{-f,--filter}'[filter pattern]:pattern:'
+  '--all[show all containers including stopped]'
+  '--favorites[show only favorite containers]'
+  '--recent[show recently used first]'
+  '--stats[force show stats]'
+  '--no-stats[force hide stats]'
+  '(-q --quiet)'{-q,--quiet}'[quieter logs]'
+  '(-v --verbose)'{-v,--verbose}'[verbose output]'
+  '(-h --help)'{-h,--help}'[show help]'
+  '--version[show version]'
+  '--config[show config locations]'
+  '--emit-completion[print completion function]'
+)
+
+case $state in
+  (containers)
+    _dexec_containers=(${(f)"$(docker ps -a --format '{{.Names}}:{{.Status}}' 2>/dev/null | sed 's/:/ - /')"})
+    _describe -t containers 'containers' _dexec_containers
+    return
+  ;;
+  (users)
+    _alternative 'users:users:(root 0 1000 nobody)' 'numeric:uid:(0 1000 33 65534)'
+    return
+  ;;
+esac
+
+_arguments -s -S $_dexec_opts '*::command:->cmds'
+
+case $state in
+  (cmds)
+    _normal
+  ;;
+esac
+ZSHCOMP
+}
+
+# ─── Dependency check ──────────────────────────────────────────────────────────
+for cmd in $REQUIRED_CMDS; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    log_error "Required command not found: $cmd"
+    log_info "Install with: brew install $cmd  # or your package manager"
+    exit 2
+  fi
+done
+
+# Load configuration
+load_config
+
+# ─── Defaults / Flags ──────────────────────────────────────────────────────────
+typeset container=""
+typeset forced_shell="${CONFIG[default_shell]}"
+typeset target_user="${CONFIG[default_user]}"
+typeset workdir=""
+typeset alloc_tty=1
+typeset quiet=0
+typeset verbose=0
+typeset privileged=0
+typeset show_all=0
+typeset show_favorites=0
+typeset show_recent=0
+typeset filter_pattern=""
+typeset -a env_vars
+typeset force_stats=""
+
+# ─── Parse args ────────────────────────────────────────────────────────────────
+typeset -a passthru
+while (( $# )); do
+  case "$1" in
+    -c|--container) shift; container="$1" ;;
+    -s|--shell)     shift; forced_shell="$1" ;;
+    -u|--user)      shift; target_user="$1" ;;
+    --root)         target_user="0" ;;
+    -w|--workdir)   shift; workdir="$1" ;;
+    -n|--no-tty)    alloc_tty=0 ;;
+    -e|--env)       shift; env_vars+=("$1") ;;
+    --privileged)   privileged=1 ;;
+    -f|--filter)    shift; filter_pattern="$1" ;;
+    --all)          show_all=1 ;;
+    --favorites)    show_favorites=1 ;;
+    --recent)       show_recent=1 ;;
+    --stats)        force_stats="true" ;;
+    --no-stats)     force_stats="false" ;;
+    -q|--quiet)     quiet=1 ;;
+    -v|--verbose)   verbose=1 ;;
+    -h|--help)      usage ;;
+    --version)      echo "$SCRIPT_NAME v$VERSION"; exit 0 ;;
+    --config)       
+      echo "Config file locations:"
+      for path in $CONFIG_PATHS; do
+        if [[ -r "$path" ]]; then
+          echo "  ✓ $path (active)"
+        else
+          echo "  ✗ $path"
+        fi
+      done
+      exit 0 ;;
+    --emit-completion) emit_completion; exit 0 ;;
+    --) shift; passthru=("$@"); break ;;
+    -*) log_error "Unknown option: $1"; usage ;;
+    *) 
+      # Assume it's a container name if no options parsed yet
+      if [[ -z "$container" ]]; then
+        container="$1"
+      else
+        log_error "Unexpected argument: $1"
+        usage
+      fi ;;
+  esac
+  shift
+done
+
+# Override config with force flags
+[[ -n "$force_stats" ]] && CONFIG[show_stats]="$force_stats"
+
+# ─── Enhanced Container Selection ─────────────────────────────────────────────
+build_container_query() {
+  local query="docker ps"
+  
+  if (( show_all )); then
+    query+=" -a"
+  fi
+  
+  query+=" --format '{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.CreatedAt}}\t{{.Size}}'"
+  
+  if [[ -n "$filter_pattern" ]]; then
+    query+=" | grep -iE '$filter_pattern'"
+  fi
+  
+  if (( show_favorites )) && [[ -n "${CONFIG[favorite_containers]}" ]]; then
+    local favorites_pattern="$(echo "${CONFIG[favorite_containers]}" | tr ' ' '|')"
+    query+=" | grep -E '($favorites_pattern)'"
+  fi
+  
+  echo "$query"
+}
+
+select_container() {
+  local container_data
+  container_data="$(eval "$(build_container_query)")"
+  
+  if [[ -z "$container_data" ]]; then
+    log_error "No containers found matching criteria"
+    return 1
+  fi
+  
+  echo "$container_data" | fzf \
+    --height="${CONFIG[fzf_height]}" \
+    --reverse --border --ansi \
+    --prompt="  ${ICON_CONTAINER} Select container > " \
+    --with-nth=2 \
+    --header="TAB: multi-select, CTRL-R: reload, CTRL-A: toggle all" \
+    --bind="ctrl-r:reload($(build_container_query))" \
+    --preview='
+      cid=$(echo {} | awk "{print \$1}")
+      name=$(echo {} | awk "{print \$2}")
+      image=$(echo {} | awk "{print \$3}")
+  cont_status=$(echo {} | awk "{print \$4}")
+
+  # Enhanced container info
+  echo "╭─ Container Details ─────────────────────────────────────────"
+  echo "│ '"${ICON_CONTAINER}"' Name:      $name"
+  echo "│   ID:        $cid"
+  echo "│   Image:     $image"  
+  echo "│   Status:    $cont_status"
+      
+      # Get additional info
+      if docker inspect $cid >/dev/null 2>&1; then
+        started=$(docker inspect --format "{{.State.StartedAt}}" $cid 2>/dev/null | cut -d. -f1)
+        health=$(docker inspect --format "{{.State.Health.Status}}" $cid 2>/dev/null)
+        ip=$(docker inspect --format "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" $cid 2>/dev/null)
+        workdir=$(docker inspect --format "{{.Config.WorkingDir}}" $cid 2>/dev/null)
+        user=$(docker inspect --format "{{.Config.User}}" $cid 2>/dev/null)
+        
+        echo "│   '"${ICON_HEALTH}"' Health:    ${health:-N/A}"
+        echo "│   Started:   $started"
+        echo "│   '"${ICON_NET}"' IP:        ${ip:-N/A}"
+        echo "│   WorkDir:   ${workdir:-/}"
+        echo "│   '"${ICON_USER}"' User:      ${user:-root}"
+        
+        # Show stats if enabled
+        if [[ "'${CONFIG[show_stats]}'" == "true" ]]; then
+          stats=$(docker stats --no-stream --format "{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}" $cid 2>/dev/null)
+          if [[ -n "$stats" ]]; then
+            cpu=$(echo "$stats" | cut -f1)
+            mem_usage=$(echo "$stats" | cut -f2)
+            mem_perc=$(echo "$stats" | cut -f3)
+            echo "│"
+            echo "│ ── Resource Usage ──────────────────────────────────────"
+            echo "│ '"${ICON_CPU}"' CPU:       $cpu"
+            echo "│ '"${ICON_MEM}"' Memory:    $mem_usage ($mem_perc)"
+          fi
+        fi
+        
+        # Show environment variables (first few)
+        echo "│"
+        echo "│ ── Environment (sample) ─────────────────────────────────"
+        docker inspect --format "{{range .Config.Env}}{{println .}}{{end}}" $cid 2>/dev/null | head -5 | sed "s/^/│   /"
+        
+        # Show volume mounts
+        echo "│"
+        echo "│ ── Volume Mounts ────────────────────────────────────────"
+        docker inspect --format "{{range .Mounts}}{{.Source}}:{{.Destination}} ({{.Type}}){{println}}{{end}}" $cid 2>/dev/null | head -3 | sed "s/^/│   /"
+        
+        echo "│"
+        echo "│ ── Recent Logs ('"${CONFIG[preview_logs]}"' lines) ─────────────────────────────"
+        docker logs --tail '"${CONFIG[preview_logs]}"' $cid 2>&1 | sed "s/^/│   /"
+      fi
+      echo "╰─────────────────────────────────────────────────────────────"
+    ' \
+    --preview-window=right:70%:wrap \
+  | awk '{print $2}'
+}
+
+# ─── Main Selection Logic ─────────────────────────────────────────────────────
+if [[ -z "$container" ]]; then
+  banner "dexec // neon shell injector"
+  
+  # Show some helpful info
+  if (( verbose )); then
+    log_info "Config loaded from: $(for path in $CONFIG_PATHS; do [[ -r "$path" ]] && echo "$path" && break; done)"
+    log_info "Filters: all=$show_all favorites=$show_favorites pattern='$filter_pattern'"
+  fi
+  
+  container="$(select_container)"
+  if [[ -z "$container" ]]; then
+    log_error "No container selected."
+    exit 1
+  fi
+fi
+
+# Validate container exists and get its state
+container_state="$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null)"
+if [[ -z "$container_state" ]]; then
+  log_error "Container not found: $container"
+  exit 1
+fi
+
+if [[ "$container_state" != "running" ]] && [[ "$container_state" != "restarting" ]]; then
+  log_warn "Container $container is not running (status: $container_state)"
+  if [[ "$container_state" == "exited" ]]; then
+    log_info "Use 'docker start $container' to start it first"
+  fi
+  exit 1
+fi
+
+# ─── Enhanced Shell Detection ─────────────────────────────────────────────────
+pick_shell() {
+  local c="$1"
+  
+  if [[ -n "$forced_shell" ]]; then
+    if docker exec "$c" sh -c "command -v $forced_shell" >/dev/null 2>&1; then
+      print -r -- "$forced_shell"
+      return 0
+    else
+      log_error "Forced shell '$forced_shell' not found in container."
+      return 1
+    fi
+  fi
+  
+  # Try preferred shells
+  local sh
+  for sh in $SHELL_PREFS; do
+    if docker exec "$c" sh -c "command -v $sh" >/dev/null 2>&1; then
+      (( verbose )) && log_info "Found shell: $sh"
+      print -r -- "$sh"
+      return 0
+    fi
+  done
+  
+  # Fallback checks
+  for fallback in /bin/sh /usr/bin/sh sh; do
+    if docker exec "$c" sh -c "test -x $fallback" >/dev/null 2>&1; then
+      log_warn "Using fallback shell: $fallback"
+      print -r -- "$fallback"
+      return 0
+    fi
+  done
+  
+  return 1
+}
+
+shell_found="$(pick_shell "$container")" || {
+  log_error "No usable shell found in $container."
+  log_info "Try: docker exec $container ls /bin/*sh"
+  exit 1
+}
+
+# ─── Build Enhanced Docker Exec Command ──────────────────────────────────────
+typeset -a exec_cmd
+exec_cmd=(docker exec)
+
+# TTY handling
+if (( alloc_tty )); then
+  exec_cmd+=(-it)
+else
+  exec_cmd+=(-i)
+fi
+
+# Privileged mode
+if (( privileged )); then
+  exec_cmd+=(--privileged)
+fi
+
+# Environment variables
+for env_var in "${env_vars[@]}"; do
+  exec_cmd+=(-e "$env_var")
+done
+
+# User
+if [[ -n "$target_user" ]]; then
+  exec_cmd+=(-u "$target_user")
+fi
+
+# Working directory with auto-detection
+if [[ -n "$workdir" ]]; then
+  exec_cmd+=(-w "$workdir")
+elif [[ "${CONFIG[auto_cd_workdir]}" == "true" ]]; then
+  # Try to detect a good working directory
+  local detected_workdir
+  detected_workdir="$(docker inspect --format '{{.Config.WorkingDir}}' "$container" 2>/dev/null)"
+  if [[ -n "$detected_workdir" && "$detected_workdir" != "/" ]]; then
+    exec_cmd+=(-w "$detected_workdir")
+    (( verbose )) && log_info "Auto workdir: $detected_workdir"
+  fi
+fi
+
+exec_cmd+=("$container")
+
+# Command handling
+if (( ${#passthru} )); then
+  # Build command string safely
+  local cmd_str="${(j: :)passthru[@]}"
+  exec_cmd+=("$shell_found" -l -c "$cmd_str")
+else
+  # Interactive shell with better startup
+  if [[ "$shell_found" == *"zsh"* ]]; then
+    exec_cmd+=("$shell_found" -l)
+  elif [[ "$shell_found" == *"bash"* ]]; then
+    exec_cmd+=("$shell_found" -l)
+  else
+    exec_cmd+=("$shell_found" -l)
+  fi
+fi
+
+# ─── Enhanced Execution with Better Feedback ──────────────────────────────────
+if (( verbose )) || ! (( quiet )); then
+  local user_info=""
+  [[ -n "$target_user" ]] && user_info=" ${ICON_USER} %F{yellow}$target_user%f"
+  
+  local env_info=""
+  (( ${#env_vars} > 0 )) && env_info=" %F{green}+${#env_vars} env%f"
+  
+  log_info "${ICON_CONTAINER} %F{magenta}$container%f  ${ICON_SHELL} %F{yellow}$shell_found%f$user_info$env_info"
+  
+  if (( verbose )); then
+    log_info "Full command: ${exec_cmd[*]}"
+  fi
+fi
+
+# Execute with proper signal handling
+trap 'log_warn "Interrupted"; exit 130' INT TERM
+
+"${exec_cmd[@]}"
+exit_status=$?
+
+if (( exit_status == 0 )); then
+  log_ok "Session ended cleanly."
+elif (( exit_status == 130 )); then
+  log_warn "Session interrupted."
+else
+  log_error "docker exec exited with status $exit_status"
+fi
+
+exit $exit_status

@@ -170,8 +170,8 @@ run_go_tests() {
 
     # Exclude packages with missing dependencies or race issues
     local test_packages=(
-        "./src/go/cmd/catalystTest/..."
-        "./src/go/cmd/unstor/..."
+        "./cmd/catalystTest/..."
+        "./cmd/unstor/..."
         # Skip stor and multiProcCLI temporarily due to race issues
         # Skip clean_branches due to missing dependencies
     )
@@ -187,9 +187,9 @@ run_go_tests() {
     if [[ $LINT == true ]]; then
         log "Linting Go code..."
         if command -v golangci-lint >/dev/null 2>&1; then
-            golangci-lint run ./src/go/...
+            golangci-lint run ./cmd/...
         else
-            go vet ./src/go/...
+            go vet ./cmd/...
         fi
     fi
 }

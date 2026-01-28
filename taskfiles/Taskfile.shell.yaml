@@ -1,15 +1,19 @@
 version: 3
 
 vars:
+  SCRIPTS_DIR:
+    sh: realpath ./scripts
   LOCAL_BIN:
     sh: realpath ./bin
 
 tasks:
   build:
-    desc: Build shell scripts
+    desc: Copy shell scripts to bin
     silent: false
     sources:
-      - "./shell/*"
+      - "{{ .SCRIPTS_DIR }}/*"
+    generates:
+      - "{{ .LOCAL_BIN }}/*"
     cmds:
       - for: sources
         cmd: cp {{ .ITEM }} {{ .LOCAL_BIN }}/{{ base .ITEM }}
@@ -19,16 +23,8 @@ tasks:
     cmds:
       - |
         if command -v shellcheck >/dev/null 2>&1; then
-          find bin shell -name "*.sh" -type f -exec shellcheck {} \;
-          find bin shell -type f -exec file {} \; | grep -E "(shell|bash|zsh)" | cut -d: -f1 | xargs shellcheck
+          # Only lint bash scripts (shellcheck doesn't support zsh)
+          find scripts -type f -exec file {} \; | grep -i "Bourne-Again" | cut -d: -f1 | xargs -r shellcheck -S error
         else
           echo "shellcheck not installed. Install with: brew install shellcheck"
         fi
-
-  organize:
-    desc: Move shell scripts from bin/ to shell/ directory
-    cmds:
-      - |
-        for script in bin/*.sh bin/*.py; do
-          [ -f "$script" ] && mv "$script" shell/ && echo "Moved $(basename $script) to shell/"
-        done

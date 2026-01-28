@@ -1,4 +1,4 @@
-module github.com/TheBranchDriftCatalyst/dotfiles-2024/cli
+module github.com/TheBranchDriftCatalyst/cli-tools
 
 go 1.24.0
 
