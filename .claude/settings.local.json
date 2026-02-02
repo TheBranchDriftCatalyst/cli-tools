@@ -51,7 +51,16 @@
       "Bash(find:*)",
       "Bash(echo:*)",
       "Bash(git merge:*)",
-      "Bash(git remote add:*)"
+      "Bash(git remote add:*)",
+      "Bash(bd create:*)",
+      "Bash(gh run list:*)",
+      "Bash(act --list:*)",
+      "Bash(act -j lint:*)",
+      "Bash(~/Library/Application Support/act/actrc)",
+      "Bash(golangci-lint:*)",
+      "Bash(act -j test-go:*)",
+      "Bash(mise ls:*)",
+      "Bash(git reset:*)"
     ],
     "deny": [],
     "ask": []
