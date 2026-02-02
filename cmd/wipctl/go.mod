@@ -6,7 +6,7 @@ toolchain go1.24.7
 
 require (
 	github.com/fatih/color v1.16.0
-	github.com/pterm/pterm v0.12.81
+	github.com/pterm/pterm v0.12.82
 	github.com/spf13/cobra v1.8.0
 )
 
