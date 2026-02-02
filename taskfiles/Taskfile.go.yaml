@@ -1,8 +1,6 @@
 version: 3
 
 vars:
-  CMD_DIR:
-    sh: realpath ./cmd
   LOCAL_BIN:
     sh: realpath ./bin
 
@@ -11,20 +9,27 @@ tasks:
     desc: Build Go CLI commands
     silent: false
     sources:
-      - "{{ .CMD_DIR }}/**/main.go"
+      - "./cmd/**/main.go"
+      - "./cmd/**/go.mod"
+      - "./cmd/**/go.sum"
+      - "./go.mod"
+      - "./go.sum"
     generates:
       - "{{ .LOCAL_BIN }}/*"
     cmds:
-      - for: sources
+      - for: { var: CLI_DIRS, split: "\n" }
         cmd: |
-          PROJECT_DIR=$(dirname {{ .ITEM }})
-          PROJECT_NAME=$(basename $PROJECT_DIR)
-          if [ -f "$PROJECT_DIR/go.mod" ]; then
-            echo "Building $PROJECT_NAME with separate go.mod"
-            cd $PROJECT_DIR && go build -o {{ .LOCAL_BIN }}/$PROJECT_NAME .
+          PROJECT_NAME=$(basename {{ .ITEM }})
+          if [ -f "{{ .ITEM }}/go.mod" ]; then
+            echo "Building $PROJECT_NAME (separate module)"
+            go build -C {{ .ITEM }} -o {{ .LOCAL_BIN }}/$PROJECT_NAME .
           else
-            go build -o {{ .LOCAL_BIN }}/$PROJECT_NAME {{ .ITEM }}
+            echo "Building $PROJECT_NAME"
+            go build -o {{ .LOCAL_BIN }}/$PROJECT_NAME ./{{ .ITEM }}/main.go
           fi
+    vars:
+      CLI_DIRS:
+        sh: ls -d cmd/*/
 
   fmt:
     desc: Format Go code

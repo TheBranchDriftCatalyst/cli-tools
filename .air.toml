@@ -4,18 +4,18 @@ tmp_dir = "tmp"
 
 [build]
   args_bin = []
-  bin = "./tmp/main"
-  cmd = "go build -o ./tmp/main ."
+  bin = ""
+  cmd = "task build"
   delay = 1000
-  exclude_dir = ["assets", "tmp", "vendor", "testdata"]
+  exclude_dir = ["assets", "tmp", "vendor", "testdata", "bin", ".task", ".beads", ".git"]
   exclude_file = []
   exclude_regex = ["_test.go"]
   exclude_unchanged = false
   follow_symlink = false
-  full_bin = ""
-  include_dir = []
-  include_ext = ["go", "tpl", "tmpl", "html"]
-  include_file = []
+  full_bin = "echo '✓ All CLI tools rebuilt successfully'"
+  include_dir = ["cmd", "scripts"]
+  include_ext = ["go", "sh", "bash", "zsh", "pl"]
+  include_file = ["Taskfile.yaml"]
   kill_delay = "0s"
   log = "build-errors.log"
   poll = false
