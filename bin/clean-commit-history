@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Clean git commit history by removing Claude-generated footer text
+# This removes:
+#   - "🤖 Generated with [Claude Code](https://claude.com/claude-code)" lines
+#   - "Co-Authored-By: Claude..." lines
+#   - Empty trailing lines left behind
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS] [REF_RANGE]
+
+Clean git commit history by removing Claude-generated footer text.
+
+OPTIONS:
+    -h, --help      Show this help message
+    -n, --dry-run   Show what would be changed without modifying history
+    -f, --force     Skip confirmation prompt
+    -C <path>       Run as if started in <path> (like git -C)
+
+REF_RANGE:
+    Git revision range to process (default: --all)
+    Examples: HEAD~10..HEAD, main..feature-branch, --all
+
+EXAMPLES:
+    $(basename "$0")                    # Clean all commits in current repo
+    $(basename "$0") -C /path/to/repo   # Clean repo at specified path
+    $(basename "$0") HEAD~5..HEAD       # Clean last 5 commits
+    $(basename "$0") -n                 # Dry run on all commits
+    $(basename "$0") -f main..HEAD      # Force clean without prompt
+
+WARNING: This rewrites git history! Only use on commits that haven't been pushed,
+         or coordinate with your team if rewriting shared history.
+EOF
+}
+
+DRY_RUN=false
+FORCE=false
+REF_RANGE="--all"
+TARGET_DIR=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -n|--dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        -f|--force)
+            FORCE=true
+            shift
+            ;;
+        -C)
+            TARGET_DIR="$2"
+            shift 2
+            ;;
+        *)
+            REF_RANGE="$1"
+            shift
+            ;;
+    esac
+done
+
+# Change to target directory if specified
+if [[ -n "$TARGET_DIR" ]]; then
+    if [[ ! -d "$TARGET_DIR" ]]; then
+        echo "Error: Directory not found: $TARGET_DIR" >&2
+        exit 1
+    fi
+    cd "$TARGET_DIR"
+fi
+
+# Check if we're in a git repository
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "Error: Not in a git repository" >&2
+    exit 1
+fi
+
+# Check if git-filter-repo is available (preferred method)
+if command -v git-filter-repo &> /dev/null; then
+    USE_FILTER_REPO=true
+else
+    USE_FILTER_REPO=false
+    echo "Note: git-filter-repo not found, using git filter-branch (slower)"
+    echo "Install git-filter-repo for better performance: pip install git-filter-repo"
+    echo ""
+fi
+
+# Function to clean a commit message
+clean_message() {
+    local msg="$1"
+    echo "$msg" | sed -E \
+        -e '/^[[:space:]]*🤖 Generated with \[Claude Code\]/d' \
+        -e '/^[[:space:]]*Generated with \[Claude Code\]/d' \
+        -e '/^[[:space:]]*Co-Authored-By:[[:space:]]*Claude/Id' \
+        -e '/^[[:space:]]*Co-authored-by:[[:space:]]*Claude/Id' \
+        | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'  # Remove trailing blank lines
+}
+
+# Dry run mode - show what would change
+if $DRY_RUN; then
+    echo "=== DRY RUN MODE ==="
+    echo "Commits that would be modified:"
+    echo ""
+
+    git log --format="%H %s" $REF_RANGE 2>/dev/null | while read -r hash subject; do
+        original=$(git log -1 --format="%B" "$hash")
+        cleaned=$(clean_message "$original")
+
+        if [[ "$original" != "$cleaned" ]]; then
+            echo "Commit: $hash"
+            echo "Subject: $subject"
+            echo "--- Original message ---"
+            echo "$original"
+            echo "--- Cleaned message ---"
+            echo "$cleaned"
+            echo "========================"
+            echo ""
+        fi
+    done
+
+    exit 0
+fi
+
+# Confirmation prompt
+if ! $FORCE; then
+    echo "WARNING: This will rewrite git history!"
+    echo "Range: $REF_RANGE"
+    echo ""
+    read -p "Are you sure you want to continue? (y/N) " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Aborted."
+        exit 1
+    fi
+fi
+
+ORIGIN_URL=$(git remote get-url origin 2>/dev/null || true)
+
+if $USE_FILTER_REPO; then
+    # Create a temporary Python script for git-filter-repo
+    FILTER_SCRIPT=$(mktemp)
+    cat > "$FILTER_SCRIPT" << 'PYTHON_SCRIPT'
+import re
+import sys
+
+def clean_message(msg):
+    lines = msg.decode('utf-8', errors='replace').split('\n')
+    cleaned = []
+
+    for line in lines:
+        # Skip Claude-generated lines
+        if re.search(r'🤖\s*Generated with \[Claude Code\]', line):
+            continue
+        if re.search(r'Generated with \[Claude Code\]', line):
+            continue
+        if re.search(r'Co-Authored-By:\s*Claude', line, re.IGNORECASE):
+            continue
+        if re.search(r'Co-authored-by:\s*Claude', line, re.IGNORECASE):
+            continue
+        cleaned.append(line)
+
+    # Remove trailing empty lines
+    while cleaned and cleaned[-1].strip() == '':
+        cleaned.pop()
+
+    return '\n'.join(cleaned).encode('utf-8')
+
+if __name__ == '__main__':
+    # This is used as a --message-callback
+    pass
+PYTHON_SCRIPT
+
+    echo "Cleaning commit history with git-filter-repo..."
+
+    git filter-repo --message-callback '
+import re
+
+def clean(msg):
+    lines = msg.decode("utf-8", errors="replace").split("\n")
+    cleaned = []
+    for line in lines:
+        if re.search(r"🤖\s*Generated with \[Claude Code\]", line):
+            continue
+        if re.search(r"Generated with \[Claude Code\]", line):
+            continue
+        if re.search(r"Co-Authored-By:\s*Claude", line, re.IGNORECASE):
+            continue
+        if re.search(r"Co-authored-by:\s*Claude", line, re.IGNORECASE):
+            continue
+        cleaned.append(line)
+    while cleaned and cleaned[-1].strip() == "":
+        cleaned.pop()
+    return "\n".join(cleaned).encode("utf-8")
+
+return clean(message)
+' --force
+
+    rm -f "$FILTER_SCRIPT"
+
+    # git-filter-repo removes origin by default as a safety measure; restore it
+    if [[ -n "$ORIGIN_URL" ]]; then
+        echo "Restoring origin remote ($ORIGIN_URL)..."
+        git remote add origin "$ORIGIN_URL"
+    fi
+
+else
+    # Fallback to git filter-branch
+    echo "Cleaning commit history with git filter-branch..."
+
+    export FILTER_BRANCH_SQUELCH_WARNING=1
+
+    # Handle --all specially for filter-branch
+    if [[ "$REF_RANGE" == "--all" ]]; then
+        FB_RANGE="-- --all"
+    else
+        FB_RANGE="$REF_RANGE"
+    fi
+
+    git filter-branch -f --msg-filter '
+        sed -E \
+            -e "/^[[:space:]]*🤖 Generated with \[Claude Code\]/d" \
+            -e "/^[[:space:]]*Generated with \[Claude Code\]/d" \
+            -e "/^[[:space:]]*Co-Authored-By:[[:space:]]*Claude/Id" \
+            -e "/^[[:space:]]*Co-authored-by:[[:space:]]*Claude/Id" \
+        | sed -e :a -e "/^\n*$/{$d;N;ba" -e "}"
+    ' $FB_RANGE
+
+    # Clean up refs
+    git for-each-ref --format="%(refname)" refs/original/ | xargs -r -n 1 git update-ref -d 2>/dev/null || true
+fi
+
+echo ""
+echo "Done! Commit history has been cleaned."
+if [[ -n "$ORIGIN_URL" ]]; then
+    echo ""
+    echo "To push the rewritten history to the remote, run:"
+    echo "  git push --force-with-lease"
+fi
