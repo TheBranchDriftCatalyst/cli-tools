@@ -2,7 +2,7 @@ module github.com/TheBranchDriftCatalyst/cli-tools
 
 go 1.24.0
 
-toolchain go1.24.7
+toolchain go1.25.7
 
 require (
 	github.com/charmbracelet/bubbles v0.21.0
